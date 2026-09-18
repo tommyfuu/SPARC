@@ -5,6 +5,16 @@ Contains paths, constants, and shared utilities.
 This extracts ALL labs and vitals (like stanfordEHRSHOT), not just basic subset.
 """
 
+# Put the repo root, data/ and models/ on sys.path, from any working directory.
+import os, sys
+_R = os.path.dirname(os.path.abspath(__file__))
+while _R != os.path.dirname(_R) and not all(
+        os.path.isdir(os.path.join(_R, _d)) for _d in ('data', 'models')):
+    _R = os.path.dirname(_R)
+for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+import sparc_paths
 import os
 import sys
 
@@ -21,11 +31,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #     export SPARC_MIMIC_OUTPUT_PATH=/path/to/SPARC_data/MIMICIV_hosp
 MIMIC_RAW_PATH = os.environ.get(
     'SPARC_MIMIC_RAW_PATH',
-    '/data/morrisq/fuc/mimic_iv_3.1_mult/hosp',
+    sparc_paths.MIMIC_RAW_DIR,
 )
 OUTPUT_PATH = os.environ.get(
     'SPARC_MIMIC_OUTPUT_PATH',
-    '/data/morrisq/fuc/SPARC_data/MIMICIV_hosp',
+    sparc_paths.DATA_ROOT + '/MIMICIV_hosp',
 )
 
 # Create output directory if it doesn't exist. Don't fail at import time if the

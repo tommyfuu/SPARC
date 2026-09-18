@@ -5,6 +5,16 @@ Creates two CSV files in the race_ethnicity output directory:
 - MIMICIV_hosp_ethnicity.csv
 """
 
+# Put the repo root, data/ and models/ on sys.path, from any working directory.
+import os, sys
+_R = os.path.dirname(os.path.abspath(__file__))
+while _R != os.path.dirname(_R) and not all(
+        os.path.isdir(os.path.join(_R, _d)) for _d in ('data', 'models')):
+    _R = os.path.dirname(_R)
+for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+import sparc_paths
 import os
 import pandas as pd
 import pickle
@@ -62,8 +72,7 @@ def main():
     # per-dataset folder) so this runs on hosts with a different mount.
     output_dir = os.environ.get(
         'SPARC_RACE_ETHNICITY_DIR',
-        '/data/morrisq/fuc/SPARC_fixed_models/results_vis/cohort_summaries'
-        '/race_ethnicity/MIMICIV_hosp',
+        sparc_paths.RESULTS_ROOT + '/results_vis/cohort_summaries/race_ethnicity/MIMICIV_hosp',
     )
     os.makedirs(output_dir, exist_ok=True)
     print(f"   Output directory: {output_dir}")

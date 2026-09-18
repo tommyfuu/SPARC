@@ -9,7 +9,7 @@ Usage:
 
     data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
         dataset='MSK',
-        data_source_path='/data/morrisq/fuc/SPARC_data/',
+        data_source_path=sparc_paths.DATA_ROOT,
         option='neutropenia_risk',
         modules='practical',
         valfold=0,
@@ -33,12 +33,12 @@ import random
 import numpy as np
 import pandas as pd
 
-# Make sure MSK_featurename_list is importable when this module is used from other directories.
+# Make sure MSK_featurename_list_060726 is importable when this module is used from other directories.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from MSK_featurename_list import (
+from MSK_featurename_list_060726 import (
     ALL_INCLUDED_TESTS, BASIC_TESTS, BASIC_TESTS_INDICES,
     EXTRA_TESTS, EXTRA_TESTS_INDICES,
     BASIC_VITALS_INDICES, EXTRA_VITALS_INDICES,
@@ -551,7 +551,8 @@ def _load_msk_demographics(dataset, data_source_path, option, competing_risk_dea
         df = df_ts  # expose the timeshift df as the demographic df
 
     # if include_gcsf:
-    with open(f'/data/morrisq/fuc/SPARC_data/DMP_ID_to_gcsf_startdates_dict.pickle', 'rb') as f:
+    # Follows data_source_path; was hardcoded to the old /data/morrisq mount.
+    with open(f'{data_source_path}/DMP_ID_to_gcsf_startdates_dict.pickle', 'rb') as f:
         data_dict_lab_dict['gcsf_dict'] = pickle.load(f)
 
     return data_dict_lab_dict, DMP_ID_to_PRIMARY_CTYPE_dict, DMP_ID_to_DATES_to_TESTSVALUES_DICT, PRIMARY_CTYPES, df
@@ -1023,7 +1024,13 @@ def _load_mutation(dataset, data_source_path, data_dict_lab_dict, modular_featur
     print("MUTATION")
     if dataset == 'MSK':
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725/feature_table_full_first_341_harmonized.csv')
-        df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/output_050725/impact_genomic_ft_341.csv')
+        # Lives beside SPARC_data, not inside it. Override with SPARC_GENOMIC_FT.
+        _genomic_ft = os.environ.get(
+            'SPARC_GENOMIC_FT',
+            os.path.join(os.path.dirname(os.path.normpath(data_source_path)),
+                         'impact_genomic_ft', 'output_050725',
+                         'impact_genomic_ft_341.csv'))
+        df = pd.read_csv(_genomic_ft)
     elif dataset == 'MSK_timeshift': # this actually does NOT exusr
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725_timeshift/timeshift_feature_table_full_first_341_harmonized.csv')
         raise ValueError(f"Mutation features not available for dataset: {dataset}")
@@ -1064,7 +1071,13 @@ def _load_clinical(dataset, data_source_path, data_dict_lab_dict, modular_featur
     print("CLINICAL FEATURES")
     if dataset == 'MSK':
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725/feature_table_full_first_341_harmonized.csv')
-        df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/output_050725/impact_genomic_ft_341.csv')
+        # Lives beside SPARC_data, not inside it. Override with SPARC_GENOMIC_FT.
+        _genomic_ft = os.environ.get(
+            'SPARC_GENOMIC_FT',
+            os.path.join(os.path.dirname(os.path.normpath(data_source_path)),
+                         'impact_genomic_ft', 'output_050725',
+                         'impact_genomic_ft_341.csv'))
+        df = pd.read_csv(_genomic_ft)
     elif dataset == 'MSK_timeshift': # this actually does NOT exusr
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725_timeshift/timeshift_feature_table_full_first_341_harmonized.csv')
         raise ValueError(f"Mutation features not available for dataset: {dataset}")
@@ -1125,7 +1138,7 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
     data_dict_lab_dict : dict
         The same dict, with dropped bundle features set to np.nan per encounter.
     """
-    from MSK_featurename_list import BASIC_TESTS, BASIC_VITALS
+    from MSK_featurename_list_060726 import BASIC_TESTS, BASIC_VITALS
 
     # Bundle definitions: {module: {bundle_name: [feature_indices_within_module]}}
     bundles = {
@@ -1264,7 +1277,7 @@ def _normalize(dataset, data_source_path, modules, data_dict_lab_dict, first_pri
             'Creatinine': (0.2, 15),    # mg/dL - std is 1.58x MSK
         }
         # Map test names to indices in BASIC_TESTS
-        from MSK_featurename_list import BASIC_TESTS
+        from MSK_featurename_list_060726 import BASIC_TESTS
         mimic_filtering_indices = {
             ('basic_lab', BASIC_TESTS.index(test_name)): (min_val, max_val)
             for test_name, (min_val, max_val) in mimic_filtering_ranges.items()

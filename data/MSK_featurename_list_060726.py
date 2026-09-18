@@ -176,3 +176,162 @@ myelo_drugs = ['DOCETAXEL','SACITUZUMAB GOVITECAN','CISPLATIN','TOPOTECAN','IRIN
 lt_drugs = ['IPILIMUMAB','ATEZOLIZUMAB','NIVOLUMAB','PEMBROLIZUMAB','AVELUMAB','CEMIPLIMAB','DOSTARLIMAB']
 aki_drugs = ['CISPLATIN', 'IFOSFAMIDE','PEMETREXED', 'METHOTREXATE', 'PAMIDRONATE', 'ZOLEDRONIC ACID']
 included_drugs = myelo_drugs + lt_drugs + aki_drugs
+# =============================================================================
+# FEATURE-MODULE CONFIG
+# -----------------------------------------------------------------------------
+# Toxicity-aligned 5-group split of the lab tests, used for per-feature-category
+# ("module") tokenization in SPARC. Each lab module maps to a CTCAE outcome axis:
+#   erythroid        -> anemia
+#   myeloid_plt      -> neutropenia / febrile neutropenia / thrombocytopenia
+#   renal_metabolic  -> AKI
+#   hepatic          -> liver toxicity
+# Vitals (if present) form their own module; static scalars (gender, age, ...)
+# and time are handled separately by the model.
+#
+# Groupings are defined over TEST NAMES so they are robust to feature ordering.
+# The model resolves these names against whatever lab ordering the data loader
+# produced (parsimonious / practical / all) at runtime.
+# =============================================================================
+
+# --- Lab groupings (by test name) --------------------------------------------
+LAB_MODULE_ERYTHROID      = ['HGB', 'HCT', 'RBC', 'MCV', 'MCH', 'MCHC', 'RDW']
+LAB_MODULE_MYELOID_PLT    = ['WBC', 'Neut', 'Mono', 'Lymph', 'Baso', 'Eos', 'Platelets']
+LAB_MODULE_RENAL_METAB    = ['Creatinine', 'BUN', 'Sodium', 'Potassium', 'Chloride',
+                             'CO2', 'Calcium', 'Glucose']
+LAB_MODULE_HEPATIC        = ['ALT', 'AST', 'ALP', 'Bilirubin, Total',
+                             'Albumin', 'Protein, Total']
+
+
+# Tumor markers / specialized assays that appear only in the 'all' / extra set.
+# Anything not claimed by the four physiological modules above falls here.
+LAB_MODULE_TUMOR_MARKERS  = ['Alphafetoprotein', 'CEA', 'PSA',
+                             'Cancer Antigen 125', 'Cancer Antigen 15-3',
+                             'Cancer Antigen 19-9', 'Beta-2 Microglobulin', 'TSH']
+LAB_MODULE_IMMATURE_MYELOID = ['Blast', 'Promyelo', 'Myelo', 'Meta',
+                               'Immature Granulocyte', 'Luc', 'Variant Lymph',
+                               'Megakaryocyte Fragment', 'Nucleated RBC',
+                               'Conjugated Bili (mg)']
+
+# Ordered list of (module_name, test_name_list). Order here defines token order.
+# A test is assigned to the FIRST module that claims it; tests present in the
+# data but unclaimed are pooled into a trailing 'other_labs' module by the model.
+LAB_MODULE_DEFINITION = [
+    ('erythroid',         LAB_MODULE_ERYTHROID),
+    ('myeloid_plt',       LAB_MODULE_MYELOID_PLT),
+    ('renal_metabolic',   LAB_MODULE_RENAL_METAB),
+    ('hepatic',           LAB_MODULE_HEPATIC),
+    ('tumor_markers',     LAB_MODULE_TUMOR_MARKERS),
+    ('immature_myeloid',  LAB_MODULE_IMMATURE_MYELOID),
+]
+
+# --- Vitals grouping ---------------------------------------------------------
+# Vitals are a single module by default. (Temperature is the FN-relevant one.)
+VITALS_MODULE_DEFINITION = [
+    ('vitals', VITALS),  # uses whatever vital subset is present
+]
+
+
+def build_module_index_config(modular_featuredim_dict,
+                              advanced_model='default'):
+    """
+    Build a per-clinical-module input config matching the EXACT column order the
+    data loader produces. The loader (see data_loaders_inf_risk_fixed.py,
+    _finalize_output / _process_default_raindrop_model) assembles each visit as:
+
+        [ static_feats (gender, age, mutation, clinical, ...) | dynamic_feats ]
+
+    where dynamic_feats are concatenated in the fixed order:
+        ['basic_lab', 'extra_lab', 'cbc_differential', 'basic_vitals', 'extra_vitals']
+
+    and within each module the feature ordering is the canonical test list
+    defined in this file (BASIC_TESTS, EXTRA_TESTS, CBC_DIFFERENTIAL_TESTS, etc.).
+
+    This function reads `modular_featuredim_dict` (what the loader was given)
+    and returns column indices into the base feature vector for each clinical
+    module, so the model can tokenize correctly regardless of which module set
+    (parsimonious, practical, all, ...) was selected.
+
+    Args:
+        modular_featuredim_dict: dict like {'basic_lab': 23, 'cbc_differential': 5,
+                                            'gender': 1, 'age': 1, ...}
+        advanced_model: 'default' | 'duett'; only 'default' is supported here
+
+    Returns:
+        dict with:
+          'modules':       list of (name, [base_col_indices]) for each lab+vital module
+          'static_start':  starting column of static features (0 if any static present)
+          'n_static':      number of static feature columns
+          'dynamic_start': column where dynamic feats begin
+          'n_dynamic':     number of dynamic columns
+          'n_base':        total base feature width (n_static + n_dynamic)
+    """
+    if advanced_model != 'default':
+        # The per-module tokenizer is only wired for advanced_model='default'.
+        # DuETT has its own time_cve path and is not supported.
+        pass
+
+    static_keys_order = ['gender', 'age', 'primary_ctype', 'genetic_ancestry',
+                         'met_status', 'clinical', 'mutation']
+    dynamic_keys_order = ['basic_lab', 'extra_lab', 'cbc_differential',
+                          'basic_vitals', 'extra_vitals']
+
+    # Static block size (prepended by the loader)
+    n_static = sum(modular_featuredim_dict.get(k, 0) for k in static_keys_order)
+
+    # Resolve dynamic block: build the ordered list of (test_name, col_index)
+    col = n_static
+    name_to_idx = {}    # for labs
+    vital_name_to_idx = {}
+
+    if modular_featuredim_dict.get('basic_lab', 0) > 0:
+        for nm in BASIC_TESTS:
+            name_to_idx[nm] = col
+            col += 1
+    if modular_featuredim_dict.get('extra_lab', 0) > 0:
+        for nm in EXTRA_TESTS:
+            name_to_idx[nm] = col
+            col += 1
+    if modular_featuredim_dict.get('cbc_differential', 0) > 0:
+        for nm in CBC_DIFFERENTIAL_TESTS:
+            # CBC differential overlaps name-wise with EXTRA_TESTS in raw test list,
+            # but cbc_differential is the *parsimonious* module that holds these.
+            # Last writer wins, which is what we want for parsimonious/practical.
+            name_to_idx[nm] = col
+            col += 1
+    if modular_featuredim_dict.get('basic_vitals', 0) > 0:
+        for nm in BASIC_VITALS:
+            vital_name_to_idx[nm] = col
+            col += 1
+    if modular_featuredim_dict.get('extra_vitals', 0) > 0:
+        for nm in [v for v in VITALS if v not in BASIC_VITALS]:
+            vital_name_to_idx[nm] = col
+            col += 1
+
+    n_dynamic = col - n_static
+
+    # Resolve clinical groupings against the columns actually present
+    modules = []
+    claimed = set()
+    for mod_name, test_names in LAB_MODULE_DEFINITION:
+        idxs = [name_to_idx[t] for t in test_names if t in name_to_idx]
+        if idxs:
+            modules.append((mod_name, idxs))
+            claimed.update(idxs)
+
+    # Pool any unclaimed labs (shouldn't happen for parsimonious/practical, can happen
+    # for 'all' if a new test is added without updating LAB_MODULE_DEFINITION)
+    leftover = [i for i in name_to_idx.values() if i not in claimed]
+    if leftover:
+        modules.append(('other_labs', sorted(leftover)))
+
+    if vital_name_to_idx:
+        modules.append(('vitals', sorted(vital_name_to_idx.values())))
+
+    return {
+        'modules': modules,
+        'static_start': 0 if n_static > 0 else None,
+        'n_static': n_static,
+        'dynamic_start': n_static,
+        'n_dynamic': n_dynamic,
+        'n_base': n_static + n_dynamic,
+    }
