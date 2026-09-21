@@ -1,17 +1,11 @@
 """
-vis_design_choice_4_parsimony_060826_bar.py
+Parsimonious vs all modules across all 7 tasks, one figure.
 
-Horizontal bar chart showing Parsimonious vs All Modules comparison
-across all 7 tasks in a single figure.
+Bars are mean +/- std over folds, with Bonferroni-corrected significance across
+tasks. AUROC column differs by task type: test_auroc_nextinf_weighted for the
+side-effect tasks, auroc for the binary ones.
 
-- Y-axis: Tasks (all 7 tasks: 5 side-effects + 2 binary)
-- X-axis: (Weighted) AUROC performance (%)
-- Two horizontal bars per task (Parsimonious, All Modules)
-- Error bars showing mean ± std across folds
-
-AUROC metric used:
-  - Side-effect tasks: test_auroc_nextinf_weighted
-  - Binary tasks: auroc
+Reads the CSVs from design_choice_comparison_4_parsimony.py.
 
 Usage:
     python vis_design_choice_4_parsimony_060826_bar.py

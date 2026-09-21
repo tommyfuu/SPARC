@@ -1,20 +1,10 @@
 """
-vis_design_choice_3_medsasfeature_060826_bar_horizontal.py
+Meds-as-features on/off across the 5 side-effect tasks.
 
-Succinct horizontal bar chart showing Meds as Features comparison across 5 side effect tasks.
+Two figures, one per metric: weighted AUROC and weighted C-index. Bars are mean
++/- std over folds, with Bonferroni-corrected significance across tasks.
 
-Creates two separate figures:
-1. Weighted AUROC performance comparison
-2. Weighted C-index performance comparison
-
-- Y-axis: Tasks (5 side effect tasks)
-- X-axis: Performance metric (%)
-- Two horizontal bars per task (Meds NOT as Features, Meds as Features)
-- Error bars showing mean ± std across folds
-- Bonferroni-corrected significance testing
-
-Data source: Results from design_choice_comparison_3_medsasfeature.py
-   which evaluates the 060726 models
+Reads the CSVs from design_choice_comparison_3_medsasfeatures.py.
 
 Usage:
     python vis_design_choice_3_medsasfeature_060826_bar_horizontal.py

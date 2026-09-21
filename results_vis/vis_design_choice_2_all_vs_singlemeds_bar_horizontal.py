@@ -1,20 +1,11 @@
 """
-vis_design_choice_2_all_vs_singlemeds_060826_bar_horizontal.py
+All-meds vs single-med models, per medication.
 
-Horizontal bar chart showing All Meds vs Single Med model comparison across medications.
+One figure per side-effect task, each with a weighted-AUROC and a weighted
+C-index panel. Medications are ordered by positive-sample ratio; bars are mean
++/- std over folds.
 
-Creates separate figures for each of the 5 side effect tasks.
-Each figure contains two subplots:
-1. Weighted AUROC performance comparison
-2. Weighted C-index performance comparison
-
-- Y-axis: Medications (sorted by positive sample ratio)
-- X-axis: Performance metric (%)
-- Two horizontal bars per medication (All Meds, Single Med)
-- Error bars showing mean ± std across folds
-- Paired significance testing (--stat_test; default paired Wilcoxon signed-rank)
-
-Data source: Results from design_choice_comparison_2_all_vs_singlemeds.py
+Reads the CSVs from design_choice_comparison_2_all_vs_singlemeds.py.
 
 Usage:
     python vis_design_choice_2_all_vs_singlemeds_060826_bar_horizontal.py

@@ -1,3 +1,22 @@
+"""
+design_choice_comparison_5_modular_new_fixed.py
+
+Single-variable comparison of the per-module tokenizer.
+
+    full   lilac-trained direct models   -umt True  -uct True -wbce True
+    nomod  ablation arm A2_nomod         -umt False -uct True -wbce True
+
+Both arms use the same model class (SPARC_inf_risk_modular) and the same
+continuous-time setting, so the tokenizer is the only thing that varies.
+
+design_choice_comparison_5's "without_modular" arm instead points at the
+pre-060726 models, which use a different model class and lack the
+continuous-time encoding and weighted BCE as well, so it confounds three
+changes at once -- which its own figure title concedes ("Modular Tokenization
++ Continuous Time Encoding").
+
+    python3 design_choice_comparison_5_modular_new_fixed.py -o AKI_risk -ds MSK -m parsimonious
+"""
 import os
 import pickle
 import sys, inspect
@@ -5,8 +24,6 @@ import pandas as pd
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir)
-from torchmetrics import PrecisionRecallCurve
-import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
@@ -23,19 +40,14 @@ import sparc_paths
 # Use the fixed versions of data loaders and model
 from data_loaders_inf_risk_fixed import *
 from dataset_loading import load_dataset
-from SPARC_inf_risk_fixed_060726 import SPARC as SPARC_modular  # New version with modular tokenization
-from SPARC_inf_risk_fixed import SPARC as SPARC_non_modular  # Old version without modular tokenization
+from SPARC_inf_risk_modular import SPARC as SPARC_modular  # New version with modular tokenization
 
 # Import module tokenizer config builder for use_module_tokenizer=True
-from MSK_featurename_list_060726 import build_module_index_config
+from MSK_featurename_list import build_module_index_config
 
-from torchmetrics import AUROC, F1Score, AveragePrecision
-import json
-import ast
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-import numpy as np
 import re
 # data_source_path will be set via command-line argument (--data_source_path)
 # Default: '/data/morrisq/fuc/SPARC_data/' if not specified
@@ -136,7 +148,7 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                             'num_samples': mask.sum().item(),
                             'mask': mask
                         })
-                except Exception as e:
+                except Exception:
                     continue
 
         if len(computable_results) > 0:
@@ -313,6 +325,7 @@ parser = argparse.ArgumentParser(
             epilog='Text at the bottom of help')
 parser.add_argument("-r", "--rseed", type=int, default = 1024, help='random seed')
 parser.add_argument("-o", "--option", type=str, default = 'binary', help='options: binary, anemia, binary_icu, binary_icu_pre, pretrain, binary_risk. It has to be pretrain when scheme is pretrain')
+parser.add_argument("-fl", "--folds", type=str, default='all', help="Comma-separated fold indices to evaluate (e.g. '0,1'), or 'all' for 0-9. Useful for a quick single-fold check before a full run.")
 parser.add_argument("-d", "--days", type=int, default = 180, help='number of days for binary classification tasks')
 parser.add_argument("-m", "--modules", type=str, default = 'practical', help='module category, either "all", "allnonICD" or connect categories by dashes such as')
 parser.add_argument("-ds", "--dataset", type=str, default = 'MSK', help='dataset used in training, options: MSK, MSK_timeshift, stanfordEHRSHOT')
@@ -329,6 +342,11 @@ parser.add_argument("-dsp", "--data_source_path", type=str, default=sparc_paths.
 parser.add_argument("-mp", "--model_path", type=str, default=sparc_paths.SPARC_MODEL_ROOT, help='path to 060726 model checkpoints directory')
 parser.add_argument("-rp", "--results_path", type=str, default=None, help='path to save results (defaults to model_path/results_vis_060726 if not specified)')
 
+parser.add_argument("-ar", "--ablation_root", type=str,
+                    default='/data1/morrisq/fuc/SPARC_ablation_direct_091826',
+                    help='root holding the ablation arms; expects <root>/A2_nomod/...')
+parser.add_argument("-rr", "--results_root", type=str, default=None,
+                    help='where to write the CSV (default: <ablation_root>/results)')
 args = parser.parse_args()
 rseed = args.rseed
 option = args.option
@@ -405,14 +423,14 @@ caia_portion = 'prior'
 # caia_portion = 'prior'
 # zeroshot = True
 
-# # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'Liver_toxicity'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = "IPILIMUMAB,ATEZOLIZUMAB,NIVOLUMAB,PEMBROLIZUMAB,AVELUMAB,CEMIPLIMAB,DOSTARLIMAB"
-# add_num_infusion = True
+# Example hardcoded values for testing (comment out when using command line args)
+rseed = 1024
+option = 'Liver_toxicity'
+days = 30
+modules = 'parsimonious'
+dataset = 'MSK'
+med_of_choice = "IPILIMUMAB,ATEZOLIZUMAB,NIVOLUMAB,PEMBROLIZUMAB,AVELUMAB,CEMIPLIMAB,DOSTARLIMAB"
+add_num_infusion = True
 
 # Example hardcoded values for testing (comment out when using command line args)
 
@@ -442,14 +460,10 @@ caia_portion = 'prior'
 #     redundant here and skipped -- only 'without_modular' is evaluated/saved.
 #   - Binary tasks (binary, binary_icu_pre): design_choice_comparison_1 does NOT produce
 #     these results, so 'with_modular' is the only source and MUST be evaluated here.
-_is_side_effect_task = bool(re.match(
-    r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$',
-    option,
-))
-if _is_side_effect_task:
-    all_models = ['without_modular']
-else:
-    all_models = ['with_modular', 'without_modular']
+# Both arms are always evaluated. Unlike design_choice_comparison_5 the control
+# is not a different model class, so neither arm duplicates
+# design_choice_comparison_1 and neither can be skipped.
+all_models = ['full', 'nomod']
 
 
 if not (bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option)) or option in ['binary', 'binary_icu_pre']):
@@ -535,7 +549,9 @@ if use_module_tokenizer:
     print("=" * 70)
 
 # Model paths for comparison
-new_model_path = sparc_paths.SPARC_MODEL_ROOT  # With modular tokenization
+ablation_root = args.ablation_root
+results_root = args.results_root or f'{ablation_root}/results'
+new_model_path = sparc_paths.SPARC_MODEL_ROOT  # lilac full-feature models
 old_model_path = sparc_paths.RESULTS_ROOT  # Without modular tokenization
 
 # Determine model names based on task type
@@ -561,21 +577,23 @@ else:
 
 # Set model folder paths
 model_folder_dict = {
-    'with_modular': f'{new_model_path}/{modules}_{dataset}_060726/SPARC_direct_models/{new_model_name}',
-    'without_modular': f'{old_model_path}/{modules}_{dataset}/SPARC_direct_models/{old_model_name}'
+    # lilac-trained direct models: -umt True -uct True -wbce True
+    'full':  f'{new_model_path}/{modules}_{dataset}_060726/SPARC_direct_models/{new_model_name}',
+    # ablation arm with ONLY the module tokenizer removed: -umt False -uct True -wbce True
+    'nomod': f'{ablation_root}/A2_nomod/{modules}_{dataset}_060726/SPARC_direct_models/{new_model_name}_new',
 }
 
 print("=" * 80)
 print("MODEL COMPARISON: Modular Tokenization + Continuous Time Encoding")
 print("=" * 80)
-print(f"With modular:    {model_folder_dict['with_modular']}")
-print(f"Without modular: {model_folder_dict['without_modular']}")
+print(f"full  (-umt True  -uct True -wbce True): {model_folder_dict['full']}")
+print(f"nomod (-umt False -uct True -wbce True): {model_folder_dict['nomod']}")
 print("=" * 80)
 
 model_performance_dict = {}
 
 # Save results to design_choices_5_modular_timeencode directory
-save_name = f'{new_model_path}/results_vis_060726/design_choices_5_modular_timeencode/modular_comparison_{modules}_{option}_{dataset}.csv'
+save_name = f'{results_root}/design_choices_5_modular_new_fixed/modular_new_fixed_{modules}_{option}_{dataset}.csv'
 os.makedirs(os.path.dirname(save_name), exist_ok=True)
 
 
@@ -684,7 +702,8 @@ else:
     # Binary tasks: keep option as-is and set model_set_option to 'binary'
     model_set_option = 'binary'
 
-all_folds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+all_folds = ([0, 1, 2, 3, 4, 5, 6, 7, 8, 9] if args.folds.lower() == 'all'
+             else [int(x) for x in args.folds.split(',') if x.strip() != ''])
 
 # Create shared data module (used for both models)
 temporal_aggregation = 'attention'
@@ -711,14 +730,13 @@ for model_option in all_models:
     pl.seed_everything(rseed)
 
     # Determine which model class to use
-    if model_option == 'with_modular':
-        ModelClass = SPARC_modular
-        use_module_tokenizer_flag = True
-        use_continuous_time_flag = True
-    else:  # without_modular
-        ModelClass = SPARC_non_modular
-        use_module_tokenizer_flag = False
-        use_continuous_time_flag = False
+    # Same model class and same continuous-time setting for BOTH arms; the only
+    # thing that varies is the per-module tokenizer. design_choice_comparison_5
+    # instead swapped the model class and disabled continuous time too, so its
+    # two arms differed in three ways at once.
+    ModelClass = SPARC_modular
+    use_continuous_time_flag = True
+    use_module_tokenizer_flag = (model_option == 'full')
 
     # Skip if already computed for all folds
     if model_option in model_performance_dict and False not in [fold in model_performance_dict[model_option] for fold in all_folds]:
@@ -851,7 +869,7 @@ for model_option in all_models:
 
                 # Debug: Print first batch info
                 if batch_count == 0:
-                    print(f"\n=== DEBUG: First Batch Info ===")
+                    print("\n=== DEBUG: First Batch Info ===")
                     print(f"Model: {model_option}, Fold: {val_fold}")
                     if 'risk' in option or bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option)):
                         print(f"y[0] type: {type(y[0])}, shape/value: {y[0] if not torch.is_tensor(y[0]) else y[0].shape}")
