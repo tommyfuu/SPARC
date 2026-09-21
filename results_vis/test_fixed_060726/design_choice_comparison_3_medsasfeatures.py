@@ -22,8 +22,8 @@ import sparc_paths
 # Use the fixed versions of data loaders and model
 from data_loaders_inf_risk_fixed import *
 from dataset_loading import load_dataset
-from MSK_featurename_list_060726 import build_module_index_config
-from SPARC_inf_risk_fixed_060726 import *
+from MSK_featurename_list import build_module_index_config
+from SPARC_inf_risk_modular import *
 import json
 import ast
 data_source_path=sparc_paths.DATA_ROOT + '/'
