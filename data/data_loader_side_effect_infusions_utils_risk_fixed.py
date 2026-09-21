@@ -1,5 +1,5 @@
 import re
-from MSK_featurename_list_060726 import *
+from MSK_featurename_list import *
 from itertools import combinations, permutations, product
 import numpy as np
 from datetime import datetime, timedelta

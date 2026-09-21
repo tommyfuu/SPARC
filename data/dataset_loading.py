@@ -33,12 +33,12 @@ import random
 import numpy as np
 import pandas as pd
 
-# Make sure MSK_featurename_list_060726 is importable when this module is used from other directories.
+# Make sure MSK_featurename_list is importable when this module is used from other directories.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from MSK_featurename_list_060726 import (
+from MSK_featurename_list import (
     ALL_INCLUDED_TESTS, BASIC_TESTS, BASIC_TESTS_INDICES,
     EXTRA_TESTS, EXTRA_TESTS_INDICES,
     BASIC_VITALS_INDICES, EXTRA_VITALS_INDICES,
@@ -1138,7 +1138,7 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
     data_dict_lab_dict : dict
         The same dict, with dropped bundle features set to np.nan per encounter.
     """
-    from MSK_featurename_list_060726 import BASIC_TESTS, BASIC_VITALS
+    from MSK_featurename_list import BASIC_TESTS, BASIC_VITALS
 
     # Bundle definitions: {module: {bundle_name: [feature_indices_within_module]}}
     bundles = {
@@ -1277,7 +1277,7 @@ def _normalize(dataset, data_source_path, modules, data_dict_lab_dict, first_pri
             'Creatinine': (0.2, 15),    # mg/dL - std is 1.58x MSK
         }
         # Map test names to indices in BASIC_TESTS
-        from MSK_featurename_list_060726 import BASIC_TESTS
+        from MSK_featurename_list import BASIC_TESTS
         mimic_filtering_indices = {
             ('basic_lab', BASIC_TESTS.index(test_name)): (min_val, max_val)
             for test_name, (min_val, max_val) in mimic_filtering_ranges.items()

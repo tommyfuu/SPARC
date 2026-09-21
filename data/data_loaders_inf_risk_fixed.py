@@ -17,8 +17,8 @@ import pickle
 from torch.utils.data import DataLoader
 import random
 import copy
-# from MSK_featurename_list_060726 import *
-from MSK_featurename_list_060726 import *
+# from MSK_featurename_list import *
+from MSK_featurename_list import *
 import time
 import re
 import math
