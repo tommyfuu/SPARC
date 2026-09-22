@@ -46,8 +46,8 @@ cd data/MIMICIV_preprocessing && python 1_extract_cancer_patients.py
 | file | what it does |
 |---|---|
 | `SPARC_inf_risk_modular.py` | the SPARC model architecture |
-| `benchmarks/duett/duett.py` | DuETT benchmark (LightningModule wrapper) |
-| `benchmarks/duett/duett_model.py` | DuETT encoder: per-variable tokens, dual event/time attention |
+| `benchmarks/duett/duett.py` | DuETT benchmark |
+| `benchmarks/duett/duett_model.py` | DuETT encoder: DuETT helper script |
 | `benchmarks/lasttp_MLP/lasttp_MLP.py` | last-timepoint MLP benchmark |
 | `benchmarks/rnn/rnn.py` | RNN benchmark |
 | `benchmarks/raindrop/raindrop.py` | Raindrop benchmark (`ob_propagation.py` is its graph layer) |
@@ -127,11 +127,6 @@ sbatch submit_eval_1_all_tasks.sh
 python3 vis_eval_1_across_tasks_t1e_controlled_bar_horizontal_succinct_wilcoxon_all.py \
     --dataset MSK_CAIA --stat_test wilcoxon --correction bonferroni --save_dir <dir>
 ```
-
-Shared helpers: `eval_utils.py` (`calculate_weighted_c_index_by_infusion`, used by the
-evals, the design-choice scripts and both benchmark trainers), `delong_test.py`
-(correlated-ROC comparison, used by the four clinical benchmarks), `llm_utils.py`
-(LLM wrapper for `clinical_benchmark_medication_classification_LLM.py`).
 
 ## interpretation/
 
