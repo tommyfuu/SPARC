@@ -34,7 +34,8 @@ import sys
 # Importable from any working directory.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(_THIS_DIR)
-for _p in (os.path.join(REPO_ROOT, 'data'), os.path.join(REPO_ROOT, 'models')):
+for _p in (os.path.join(REPO_ROOT, 'data'), os.path.join(REPO_ROOT, 'models'),
+           os.path.join(REPO_ROOT, 'results_vis')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -46,8 +47,7 @@ import pytorch_lightning as pl
 from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier
 
-from torchmetrics import AUROC, F1Score, AveragePrecision, Accuracy, Precision, Recall
-from torchsurv.metrics.cindex import ConcordanceIndex
+from torchmetrics import AUROC, F1Score, AveragePrecision
 
 from data_loaders_inf_risk_fixed import *   # noqa: F401,F403  (FlexibleFeatureDataModule et al.)
 from dataset_loading import load_dataset
@@ -62,10 +62,8 @@ DEFAULT_OUTPUT_ROOT = os.path.join(
 # Side-effect tasks (with or without a risk framing suffix).
 SE_TASK_PATTERN = r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$'
 
-# ---------------------------------------------------------------------------
 # Which shallow models exist and how each reads the time series.  `lasttp` uses
 # only the most recent timepoint; `temporal` flattens the whole window.
-# ---------------------------------------------------------------------------
 MODEL_REGISTRY = {
     'lasttp_xgboost':   {'representation': 'lasttp'},
     'temporal_xgboost': {'representation': 'temporal'},
@@ -96,266 +94,9 @@ def build_output_model_path(output_root, model_option, dataset, caia_portion,
 loss_fn = nn.BCELoss(reduction='none')
 
 
-def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_infusion,
-                                           mode='train', option='AKI_risk'):
-    """
-    Calculate weighted C-index stratified by infusion number.
-    Only includes infusions where C-index can be computed.
-
-    Returns:
-        dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                    auroc metrics, and optionally binary_loss (as tensor for backprop)
-    """
-    auroc_fn = AUROC(task='binary')
-    accuracy_fn = Accuracy(task='binary')
-    balanced_accuracy_fn = Accuracy(task='binary', average='macro')
-    precision_fn = Precision(task='binary')
-    recall_fn = Recall(task='binary')
-    f1_fn = F1Score(task='binary')
-    auprc_fn = AveragePrecision(task='binary')
-    output_dict = {}
-    num_infusion_tensor = torch.as_tensor(num_infusion)
-    y_event_tensor = torch.as_tensor(y_event)
-    time_to_event_tensor = torch.as_tensor(time_to_event).float()
-
-    unique_infusions = torch.unique(num_infusion_tensor)
-    risk_scores = y_pred.squeeze()
-
-    # ========================================================================
-    # Part 1: Risk prediction metrics (C-index)
-    # ========================================================================
-    if 'risk' in option:
-        # First pass: identify valid infusions (has both events and censoring)
-        valid_infusions = []
-        for infusion in unique_infusions:
-            mask = num_infusion_tensor == infusion
-            current_events = y_event_tensor[mask]
-
-            if current_events.sum() > 0 and current_events.sum() < len(current_events):
-                valid_infusions.append(infusion)
-        # Calculate raw C-index (no stratification)
-        try:
-            c_index = ConcordanceIndex()
-            c_idx_raw = c_index(
-                risk_scores.unsqueeze(1),
-                y_event_tensor.bool(),
-                time_to_event_tensor
-            ).item()
-        except Exception:
-            c_idx_raw = 0.5
-
-        # Initialize with defaults
-        c_index_weighted = 0.5
-        overall_c_index = 0.5
-        num_groups = 0
-        total_samples = 0
-        computable_results = []
-
-        if len(valid_infusions) > 0:
-            # Second pass: compute C-index for valid infusions
-            for infusion in valid_infusions:
-                mask = num_infusion_tensor == infusion
-                current_risk = risk_scores[mask]
-                current_events = y_event_tensor[mask]
-                current_times = time_to_event_tensor[mask].float()
-
-                try:
-                    c_index = ConcordanceIndex()
-                    c_idx_val = c_index(
-                        current_risk.unsqueeze(1),
-                        current_events.bool(),
-                        current_times
-                    )
-                    computable_results.append({
-                        'infusion': infusion.item(),
-                        'c_index': c_idx_val.item(),
-                        'num_samples': mask.sum().item(),
-                        'mask': mask
-                    })
-                except Exception:
-                    continue
-
-        if len(computable_results) > 0:
-            # Calculate weighted C-index
-            total_samples = sum(r['num_samples'] for r in computable_results)
-            c_index_weighted = sum(
-                r['c_index'] * r['num_samples'] / total_samples
-                for r in computable_results
-            )
-
-            # Calculate overall C-index
-            all_mask = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
-            for r in computable_results:
-                all_mask |= r['mask']
-
-            try:
-                overall_c_index = c_index(
-                    risk_scores[all_mask].unsqueeze(1),
-                    y_event_tensor[all_mask].bool(),
-                    time_to_event_tensor[all_mask]
-                ).item()
-            except Exception:
-                overall_c_index = 0.5
-
-            num_groups = len(computable_results)
-
-        output_dict.update({
-            'c_index_raw': c_idx_raw,
-            'c_index_weighted': c_index_weighted,
-            'c_index_overall': overall_c_index,
-            'num_groups': num_groups,
-            'num_samples': total_samples,
-            'per_infusion': computable_results,
-        })
-
-    # ========================================================================
-    # Part 2: Next-infusion side effect prediction (AUROC)
-    # ========================================================================
-
-    # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
-    ### flattened tensors
-    time_to_event_tensor = time_to_event_tensor.flatten()
-    next_infusion_event = ((y_event_tensor == 1) & (time_to_event_tensor == 1)).float()
-
-    # First pass: identify valid infusions for AUROC (need both classes)
-    valid_infusions_auroc = []
-    for infusion in unique_infusions:
-        mask = num_infusion_tensor == infusion
-        current_next_events = next_infusion_event[mask]
-
-        # Valid if has both positives and negatives
-        has_positives = current_next_events.sum() > 0
-        has_negatives = current_next_events.sum() < len(current_next_events)
-
-        if has_positives and has_negatives:
-            valid_infusions_auroc.append(infusion)
-
-    # Initialize defaults
-    auroc_next_weighted = 0.5
-    auroc_next_overall = 0.5
-    accuracy_next_weighted = 0.5
-    precision_next_weighted = 0.5
-    recall_next_weighted = 0.5
-    auprc_next_weighted = 0.5
-    num_groups_auroc = 0
-    num_samples_auroc = 0
-    binary_loss_weighted = None  # Will be tensor if binary mode
-
-    if len(valid_infusions_auroc) > 0:
-        # Second pass: compute AUROC for valid infusions
-        computable_auroc_results = []
-
-        # calculate binary loss across all samples for vectorized comparison
-        all_sample_losses = loss_fn(
-            risk_scores.unsqueeze(-1),
-            next_infusion_event.unsqueeze(-1)
-        ) if 'risk' not in option else None
-
-        for infusion in valid_infusions_auroc:
-            mask = num_infusion_tensor == infusion
-            current_risk = risk_scores[mask]
-            current_next_events = next_infusion_event[mask]
-            try:
-                current_res = {'num_samples': mask.sum().item()}
-                if mode != 'train':
-                    # Calculate metrics
-                    auroc = auroc_fn(current_risk, current_next_events.int())
-                    accuracy = accuracy_fn(current_risk, current_next_events.int())
-                    precision = precision_fn(current_risk, current_next_events.int())
-                    recall = recall_fn(current_risk, current_next_events.int())
-                    auprc = auprc_fn(current_risk, current_next_events.int())
-                    print("infusion", infusion.item(), "auroc", auroc.item(), "accuracy", accuracy.item(),
-                          "precision", precision.item(), "recall", recall.item(), "auprc", auprc.item())
-                    current_res = {
-                        'infusion': infusion.item(),
-                        'auroc': auroc.item(),
-                        'accuracy': accuracy,
-                        'precision': precision,
-                        'recall': recall,
-                        'auprc': auprc,
-                        'num_samples': mask.sum().item(),
-                        'num_positives': current_next_events.sum().item(),
-                        'mask': mask
-                    }
-
-                # Calculate binary loss (keep as tensor for backprop!)
-                if 'risk' not in option:
-                    binary_loss = all_sample_losses[mask].mean()
-                    current_res['binary_loss'] = binary_loss  # Keep as tensor
-
-                computable_auroc_results.append(current_res)
-
-            except Exception as e:
-                print(f"Skipping AUROC for infusion {infusion.item()}: {e}")
-                continue
-
-        if len(computable_auroc_results) > 0:
-            # Calculate weighted metrics
-            total_samples_auroc = sum(r['num_samples'] for r in computable_auroc_results)
-            if mode != 'train':
-                auroc_next_weighted = sum(
-                    r['auroc'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                )
-                accuracy_next_weighted = sum(
-                    r['accuracy'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                )
-                precision_next_weighted = sum(
-                    r['precision'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                )
-                recall_next_weighted = sum(
-                    r['recall'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                )
-                auprc_next_weighted = sum(
-                    r['auprc'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                )
-                num_groups_auroc = len(computable_auroc_results)
-                num_samples_auroc = total_samples_auroc
-                output_dict.update({
-                    # Next-infusion prediction metrics
-                    'auroc_next_infusion_weighted': auroc_next_weighted,
-                    'accuracy_next_infusion_weighted': accuracy_next_weighted,
-                    'precision_next_infusion_weighted': precision_next_weighted,
-                    'recall_next_infusion_weighted': recall_next_weighted,
-                    'auprc_next_infusion_weighted': auprc_next_weighted,
-                    'num_groups_next_infusion': num_groups_auroc,
-                    'per_infusion_auroc': computable_auroc_results
-                })
-
-            # Calculate weighted binary loss (keep as tensor!)
-            if 'risk' not in option:
-                binary_loss_weighted = torch.stack([
-                    r['binary_loss'] * r['num_samples'] / total_samples_auroc
-                    for r in computable_auroc_results
-                ]).sum()
-            if mode != 'train':
-                # Calculate overall AUROC across all valid samples
-                all_mask_auroc = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
-                for r in computable_auroc_results:
-                    all_mask_auroc |= r['mask']
-
-                try:
-                    auroc_next_overall = auroc_fn(
-                        risk_scores[all_mask_auroc],
-                        next_infusion_event[all_mask_auroc].int()
-                    ).item()
-                except Exception:
-                    auroc_next_overall = 0.5
-                output_dict['auroc_next_infusion_overall'] = auroc_next_overall
-
-    else:
-        return None  # to be skipped in trainer loop so that no backprop is done
-
-    # Add binary loss as tensor (for backprop) if in binary mode
-    if 'risk' not in option and binary_loss_weighted is not None:
-        output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
-        output_dict['num_samples_next_infusion'] = num_samples_auroc
-
-    return output_dict
+# Shared with eval_1/eval_2/eval_3 and the design-choice scripts; one copy
+# in results_vis/eval_utils.py so the metric cannot drift between them.
+from eval_utils import calculate_weighted_c_index_by_infusion
 
 
 def build_feature_matrix(ds, representation, include_infusion_dates, add_num_infusion):
@@ -440,9 +181,7 @@ def _to_jsonable(obj):
     return obj
 
 
-# ---------------------------------------------------------------------------
 # Arguments
-# ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(
     prog='SPARC shallow-learning benchmarks',
     description='Train a tree-ensemble benchmark on the SPARC feature matrix',
@@ -514,9 +253,7 @@ if not os.path.isdir(data_source_path):
         f'data_source_path does not exist: {data_source_path}\n'
         f'Pass -vp/--volume_path or set $SPARC_DATA_PATH to the SPARC_data directory.')
 
-# ---------------------------------------------------------------------------
 # Task / model compatibility
-# ---------------------------------------------------------------------------
 is_se_task = bool(re.match(SE_TASK_PATTERN, option))
 is_risk_task = 'risk' in option
 
@@ -540,17 +277,13 @@ for med_str in med_of_choice:
 med_of_choice = result_meds
 print("med_of_choice is a list of medications:", med_of_choice)
 
-# ---------------------------------------------------------------------------
 # Output directory: one root, subdivided by model family / model / dataset / task / fold
-# ---------------------------------------------------------------------------
 output_model_path = build_output_model_path(
     output_root, model_option, dataset, caia_portion, modules, option, valfold)
 os.makedirs(output_model_path, exist_ok=True)
 print("output model path", output_model_path)
 
-# ---------------------------------------------------------------------------
 # Load dataset (all loading/normalization/splitting is in dataset_loading.py)
-# ---------------------------------------------------------------------------
 print("Loading dataset...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
@@ -591,9 +324,7 @@ data_module = FlexibleFeatureDataModule(
     advanced_model=advanced_model, include_infusion_dates=include_infusion_dates, anc=anc)
 print("data module initiated")
 
-# ---------------------------------------------------------------------------
 # Feature matrices
-# ---------------------------------------------------------------------------
 print("Building train feature matrix...")
 train_X, train_y_l, _ = build_feature_matrix(
     data_module.train_dataset, representation, include_infusion_dates, add_num_infusion)
@@ -605,9 +336,7 @@ print("train_X", train_X.shape, "test_X", test_X.shape)
 if train_X.shape[1] != test_X.shape[1]:
     raise ValueError(f'Train/test feature dimension mismatch: {train_X.shape[1]} vs {test_X.shape[1]}')
 
-# ---------------------------------------------------------------------------
 # Grid search
-# ---------------------------------------------------------------------------
 print("param_grid", PARAM_GRID)
 
 grid_search = GridSearchCV(
@@ -618,9 +347,7 @@ grid_search = GridSearchCV(
 grid_search.fit(train_X, np.asarray(train_y_l))
 print("best params", grid_search.best_params_, "best CV score", grid_search.best_score_)
 
-# ---------------------------------------------------------------------------
 # Evaluate on the held-out split
-# ---------------------------------------------------------------------------
 metrics = {}
 y_pred = torch.tensor(grid_search.predict_proba(test_X)[:, 1]).float()
 
@@ -644,9 +371,7 @@ elif is_se_task:
 else:
     print(f"No evaluation defined for task '{option}'; skipping metrics.")
 
-# ---------------------------------------------------------------------------
 # Save the best model plus provenance, under the per-model-type directory
-# ---------------------------------------------------------------------------
 best_estimator = grid_search.best_estimator_
 
 model_file = os.path.join(output_model_path, f'{model_option}_model.pickle')
