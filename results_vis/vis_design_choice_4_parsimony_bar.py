@@ -8,7 +8,7 @@ side-effect tasks, auroc for the binary ones.
 Reads the CSVs from design_choice_comparison_4_parsimony.py.
 
 Usage:
-    python vis_design_choice_4_parsimony_060826_bar.py
+    python vis_design_choice_4_parsimony_bar.py
 """
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
@@ -65,12 +65,16 @@ def paired_test(vals1, vals2):
         return float('nan')
 
 
-# ============================================================
 # Configuration
-# ============================================================
 all_model_path = sparc_paths.SPARC_MODEL_ROOT
 csv_dir = f'{all_model_path}/results_vis_060726/design_choices_4_parsimony'
-save_dir = csv_dir
+import argparse
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--save_dir', type=str, default=None,
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
+args = parser.parse_args()
+
+save_dir = args.save_dir if args.save_dir else csv_dir
 dataset = 'MSK'
 # Paired by design (same folds in both arms); see paired_test() below.
 STAT_TEST = os.environ.get('STAT_TEST', 'wilcoxon')
@@ -108,9 +112,7 @@ MODEL_COLORS = {
     'all': '#707070',               # Dark gray (baseline - more complex with all modules)
 }
 
-# ============================================================
 # Load CSVs
-# ============================================================
 task_data = {}
 
 for task in ALL_TASKS:
@@ -137,9 +139,7 @@ if n_tasks == 0:
 print(f"\nLoaded {n_tasks} tasks: {available_tasks}")
 print(f"Plotting {len(MODELS_TO_PLOT)} module configurations: {[MODEL_DISPLAY[m] for m in MODELS_TO_PLOT]}\n")
 
-# ============================================================
 # Data summary export (aggregate the per-task CSVs into one)
-# ============================================================
 # AUROC_COL is per-task here (weighted-next-infusion AUROC for side-effect tasks,
 # plain AUROC for binary tasks), so pass it through as a per-task mapping.
 build_design_choice_summary(
@@ -155,17 +155,13 @@ build_design_choice_summary(
     to_percent=True,
 )
 
-# ============================================================
 # Bonferroni-corrected significance thresholds
 # α = 0.05 / n_tasks
-# ============================================================
 alpha = 0.05
 alpha_corr = alpha / n_tasks
 print(f"Bonferroni-corrected α = {alpha}/{n_tasks} = {alpha_corr:.4f}\n")
 
-# ============================================================
 # Helper functions
-# ============================================================
 def get_vals(task, model_key):
     """Get fold-level AUROC values for a model on a task"""
     col = AUROC_COL[task]
@@ -181,9 +177,7 @@ def get_vals(task, model_key):
         return vals * 100  # Convert to percent
     return vals
 
-# ============================================================
 # Create single figure with all tasks
-# ============================================================
 n_models = len(MODELS_TO_PLOT)
 bar_height = 0.5  # Thicker bars
 task_gap = 0.6    # Gap between task groups
@@ -229,10 +223,8 @@ for task in available_tasks:
                    color=color, edgecolor='black', linewidth=1.0,
                    error_kw={'elinewidth': 1.2, 'capsize': 3, 'capthick': 1.2})
 
-# ============================================================
 # Bonferroni-corrected significance testing
 # Compare Parsimonious vs All Modules for each task
-# ============================================================
 print("\n" + "="*70)
 print("SIGNIFICANCE TESTING (Parsimonious vs All Modules)")
 print("="*70)

@@ -1,19 +1,6 @@
-"""
-design_choice_comparison_5_modular_new_fixed.py
+"""Single-variable comparison of the per-module tokenizer.
 
-Single-variable comparison of the per-module tokenizer.
-
-    full   lilac-trained direct models   -umt True  -uct True -wbce True
-    nomod  ablation arm A2_nomod         -umt False -uct True -wbce True
-
-Both arms use the same model class (SPARC_inf_risk_modular) and the same
-continuous-time setting, so the tokenizer is the only thing that varies.
-
-design_choice_comparison_5's "without_modular" arm instead points at the
-pre-060726 models, which use a different model class and lack the
-continuous-time encoding and weighted BCE as well, so it confounds three
-changes at once -- which its own figure title concedes ("Modular Tokenization
-+ Continuous Time Encoding").
+Run it:
 
     python3 design_choice_comparison_5_modular_new_fixed.py -o AKI_risk -ds MSK -m parsimonious
 """
@@ -126,57 +113,10 @@ caia_portion = 'prior'
 
 
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'febrile_neutropenia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-# caia_portion = 'prior'
-
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'anemia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-# caia_portion = 'prior'
-
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'anemia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-# caia_portion = 'prior'
-# zeroshot = True
-
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'neutropenia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-# caia_portion = 'prior'
-
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'febrile_neutropenia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK_CAIA'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-# caia_portion = 'prior'
-# zeroshot = True
-
 # Example hardcoded values for testing (comment out when using command line args)
 rseed = 1024
 option = 'Liver_toxicity'
@@ -191,23 +131,7 @@ add_num_infusion = True
 # Example hardcoded values for testing (comment out when using command line args)
 
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'anemia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK_CAIA'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-
 # # Example hardcoded values for testing (comment out when using command line args)
-# rseed = 1024
-# option = 'neutropenia'
-# days = 30
-# modules = 'parsimonious'
-# dataset = 'MSK_CAIA'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-
 # Model selection depends on task type:
 #   - Side-effect tasks (AKI, anemia, neutropenia, febrile_neutropenia, Liver_toxicity):
 #     'with_modular' is identical to SPARC_cox in design_choice_comparison_1, so it is
@@ -731,51 +655,5 @@ for model_option in all_models:
     os.makedirs(os.path.dirname(save_name), exist_ok=True)
     model_performance_df.to_csv(save_name, index=False)
 
-# # For each DL model, calculate the averaged y_pred over folds (late fusion) with test set y_true to calculate metrics
-# for model_option in ['SPARC', 'SPARC-P', 'SPARC-P-Progressive'] + dl_models:
-#     if model_set_option == 'binary':
-#         y_preds_averaged = np.mean(np.array([model_performance_dict[model_option][val_fold]['y_preds'] for val_fold in model_performance_dict[model_option].keys()]), axis=0).tolist()
-#         y_trues = model_performance_dict[model_option][0]['y_trues']  # y_trues is the same for all folds
-#         model_performance_dict[f'{model_option}_averaged'] = {}
-#         if model_set_option == 'binary':
-#             auroc = AUROC(task='binary')
-#             f1 = F1Score(task='binary')
-#             auprc = AveragePrecision(task='binary')
-#             auroc_score = auroc(torch.tensor(y_preds_averaged), torch.tensor(y_trues)).item()
-#             f1_score = f1(torch.tensor(y_preds_averaged), torch.tensor(y_trues)).item()
-#             auprc_score = auprc(torch.tensor(y_preds_averaged).float(), torch.tensor(y_trues)).item()
-#             print(f'model {model_option} AUROC: {auroc_score}, F1: {f1_score}, AUPRC: {auprc_score}')
-#             model_performance_dict[f'{model_option}_averaged'] = {'auroc': auroc_score,  'auprc': auprc_score, 'y_preds': y_preds_averaged, 'y_trues': y_trues}
-
-# for model_option in ['lasttp_xgboost', 'temporal_xgboost']:
-#     if model_set_option == 'binary':
-#         y_preds_averaged = np.mean(np.array([model_performance_dict[model_option][val_fold]['y_preds'] for val_fold in model_performance_dict[model_option].keys()]), axis=0).tolist()
-#         y_trues = model_performance_dict[model_option][0]['y_trues']  # y_trues is the same for all folds
-#         model_performance_dict[f'{model_option}_averaged'] = {}
-#         auroc = AUROC(task='binary')
-#         f1 = F1Score(task='binary')
-#         auprc = AveragePrecision(task='binary')
-#         auroc_score = auroc(torch.tensor(y_preds_averaged), torch.tensor(y_trues)).item()
-#         f1_score = f1(torch.tensor(y_preds_averaged), torch.tensor(y_trues)).item()
-#         auprc_score = auprc(torch.tensor(y_preds_averaged).float(), torch.tensor(y_trues)).item()
-#         print(f'model {model_option} AUROC: {auroc_score}, F1: {f1_score}, AUPRC: {auprc_score}')
-#         model_performance_dict[f'{model_option}_averaged'] = {'auroc': auroc_score, 'auprc': auprc_score, 'y_preds': y_preds_averaged, 'y_trues': y_trues}
-
-# # Final save - rebuild entire dataframe including averaged models
-# model_performance_df = pd.DataFrame(columns=all_columns)
-# for model_option in model_performance_dict.keys():
-#     if 'average' not in model_option:
-#         for val_fold in model_performance_dict[model_option].keys():
-#             row = {'model': model_option, 'val_fold': val_fold}
-#             row.update(model_performance_dict[model_option][val_fold])
-#             row = [row[col] if col in row else None for col in all_columns]
-#             model_performance_df = pd.concat([model_performance_df, pd.DataFrame([row], columns=all_columns)], ignore_index=True)
-#     else:
-#         row = {'model': model_option, 'val_fold': 'averaged'}
-#         row.update(model_performance_dict[model_option])
-#         row = [row[col] if col in row else None for col in all_columns]
-#         model_performance_df = pd.concat([model_performance_df, pd.DataFrame([row], columns=all_columns)], ignore_index=True)
-# # Save once at the end after all averaging
-# model_performance_df.to_csv(save_name, index=False)
 
 # print("done")

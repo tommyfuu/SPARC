@@ -3,8 +3,8 @@ Module-tokenizer ablation (with vs without) across all 7 tasks, one figure.
 
 Bars are mean +/- std over folds. Both arms come from a single CSV per task,
 written by design_choice_comparison_5_modular_new_fixed.py, which varies only
-the tokenizer -- unlike vis_design_choice_5_modular_timeencode, whose arms also
-differed in model class, continuous-time encoding and weighted BCE.
+the tokenizer. An earlier timeencode ablation confounded this by also varying
+model class, continuous-time encoding and weighted BCE; it is in deprecated/.
 
 Metric (-mt): 'auroc' uses test_auroc_nextinf_weighted for the side-effect tasks
 and auroc for the binary ones; 'cindex' uses test_cindex_weighted and skips the
@@ -48,9 +48,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from scipy.stats import ttest_rel, wilcoxon, mannwhitneyu
 
-# ============================================================
 # Configuration
-# ============================================================
 parser = argparse.ArgumentParser()
 parser.add_argument("-ar", "--ablation_root", type=str,
                     default='/data1/morrisq/fuc/SPARC_ablation_direct_091826',
@@ -68,8 +66,8 @@ parser.add_argument("-st", "--stat_test", type=str, default='wilcoxon',
                          "alternative -- avoid it here: on binary_icu_pre one fold differs by +11.66 vs "
                          "+0.14..+3.73 for the rest, which triples the SD of the differences and drives p "
                          "from 0.002 to 0.064 even though all 10 folds favour the same arm. "
-                         "'mannwhitney' is unpaired -- it reproduces "
-                         "vis_design_choice_5_modular_timeencode_060826_bar.py. "
+                         "'mannwhitney' is unpaired -- it reproduces the deprecated "
+                         "timeencode figure. "
                          "Note at n=10 the smallest attainable two-sided p is 0.00195, so the strongest "
                          "results all pin there; read the delta column for effect size, not the stars.")
 parser.add_argument("-bf", "--bonferroni", type=str, default='False',
@@ -80,11 +78,13 @@ parser.add_argument("-am", "--auroc_mode", type=str, default='weighted', choices
                     help="For side-effect tasks only. 'weighted' averages per-infusion-group AUROCs "
                          "weighted by group size (groups with one class present are dropped); 'overall' "
                          "pools all valid samples into a single AUROC. Binary tasks have one AUROC either way.")
+parser.add_argument('--save_dir', type=str, default=None,
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
 args = parser.parse_args()
 
 results_root = args.results_root or f'{args.ablation_root}/results'
 csv_dir = f'{results_root}/design_choices_5_modular_new_fixed'
-save_dir = csv_dir
+save_dir = args.save_dir if args.save_dir else csv_dir
 modules = args.modules
 dataset = args.dataset
 metric = args.metric
@@ -138,9 +138,7 @@ MODEL_COLORS = {
     'nomod': '#A0A0A0',   # gray, the ablated baseline
 }
 
-# ============================================================
 # Load CSVs
-# ============================================================
 task_data = {}
 
 for task in ALL_TASKS:
@@ -186,9 +184,7 @@ if n_tasks == 0:
 print(f"\nLoaded {n_tasks} tasks: {available_tasks}")
 print(f"Metric: {metric} ({X_LABEL})\n")
 
-# ============================================================
 # Data summary export — same aggregation the figure plots from
-# ============================================================
 build_design_choice_summary(
     design_choice='design_choice_5_modular_new_fixed',
     task_data=task_data,
@@ -219,9 +215,7 @@ def get_vals(task, model_key):
     return vals * 100 if len(vals) and vals.max() <= 1.0 else vals
 
 
-# ============================================================
 # Figure
-# ============================================================
 n_models = len(MODELS_TO_PLOT)
 bar_height = 0.5
 task_gap = 0.6
@@ -252,9 +246,7 @@ for task in available_tasks:
                 error_kw={'elinewidth': 1.2, 'capsize': 3, 'capthick': 1.2})
         # direct value label -- two series, so labelling both stays readable
 
-# ============================================================
 # Paired significance testing -- test and correction are both selectable (-st / -bf)
-# ============================================================
 alpha = 0.05
 bonferroni = args.bonferroni.lower() == 'true'
 print("=" * 78)

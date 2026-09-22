@@ -7,8 +7,8 @@ Two figures, one per metric: weighted AUROC and weighted C-index. Bars are mean
 Reads the CSVs from design_choice_comparison_3_medsasfeatures.py.
 
 Usage:
-    python vis_design_choice_3_medsasfeature_060826_bar_horizontal.py
-    python vis_design_choice_3_medsasfeature_060826_bar_horizontal.py --dataset MSK_CAIA_timeshift
+    python vis_design_choice_3_medsasfeature_bar_horizontal.py
+    python vis_design_choice_3_medsasfeature_bar_horizontal.py --dataset MSK_CAIA_timeshift
 """
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
@@ -66,9 +66,7 @@ def paired_test(vals1, vals2):
         return float('nan')
 
 
-# ============================================================
 # Argument parsing
-# ============================================================
 parser = argparse.ArgumentParser(description='Succinct horizontal bar chart: medications as features comparison')
 parser.add_argument('--dataset', type=str, default='MSK',
                     help='Dataset name (default: MSK)')
@@ -81,19 +79,19 @@ parser.add_argument('--stat_test', type=str, default='wilcoxon',
                          "'ttest_ind' are the UNPAIRED tests this script used previously, kept "
                          "to reproduce the old figures. A non-default choice is appended to the "
                          "output filename.")
+parser.add_argument('--save_dir', type=str, default=None,
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
 args = parser.parse_args()
 STAT_TEST = args.stat_test
 
 dataset = args.dataset
 modules = args.modules
 
-# ============================================================
 # Configuration
-# ============================================================
 all_model_path = sparc_paths.SPARC_MODEL_ROOT
 results_subfolder = 'results_vis_060726'
 csv_dir = f'{all_model_path}/{results_subfolder}/design_choices_3_medsasfeatures'
-save_dir = csv_dir
+save_dir = args.save_dir if args.save_dir else csv_dir
 os.makedirs(save_dir, exist_ok=True)
 
 # Define the 5 side effect tasks
@@ -121,9 +119,7 @@ FEATURE_COLORS = {
     'med_as_feature_True': '#3B4992',     # Royal blue (highlighted)
 }
 
-# ============================================================
 # Load CSVs
-# ============================================================
 task_data = {}
 
 for task in SIDE_EFFECT_TASKS:
@@ -145,9 +141,7 @@ if n_tasks == 0:
 print(f"\nLoaded {n_tasks} tasks: {available_tasks}")
 print(f"Plotting {len(FEATURE_MODELS)} feature options: {[FEATURE_DISPLAY[m] for m in FEATURE_MODELS]}\n")
 
-# ============================================================
 # Data summary export (aggregate the per-task CSVs into one)
-# ============================================================
 build_design_choice_summary(
     design_choice='design_choice_3_medsasfeature',
     task_data=task_data,
@@ -164,17 +158,13 @@ build_design_choice_summary(
     to_percent=True,
 )
 
-# ============================================================
 # Bonferroni-corrected significance thresholds
 # α = 0.05 / n_tasks
-# ============================================================
 alpha = 0.05
 alpha_corr = alpha / n_tasks
 print(f"Bonferroni-corrected α = {alpha}/{n_tasks} = {alpha_corr:.4f}\n")
 
-# ============================================================
 # Helper functions
-# ============================================================
 def get_vals(task, model_key, metric_col):
     """Get fold-level metric values for a model on a task"""
     df = task_data.get(task)
@@ -185,9 +175,7 @@ def get_vals(task, model_key, metric_col):
         return np.array([])
     return rows[metric_col].dropna().values * 100   # → percent
 
-# ============================================================
 # Create figure function for each metric
-# ============================================================
 def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
     """Create a horizontal bar chart for a specific metric"""
 
@@ -235,9 +223,7 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
                        color=color, edgecolor='black', linewidth=1.2,
                        error_kw={'elinewidth': 1.2, 'capsize': 3, 'capthick': 1.2})
 
-    # ============================================================
     # Bonferroni-corrected significance testing
-    # ============================================================
     print("\n" + "="*70)
     print(f"SIGNIFICANCE TESTING - {metric_name}")
     print("="*70)
@@ -332,9 +318,7 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
     print(f"  {out_pdf}")
     print(f"  {out_png}\n")
 
-# ============================================================
 # Create both figures (AUROC and C-index)
-# ============================================================
 
 # Create AUROC figure
 create_horizontal_barchart('test_auroc_nextinf_weighted', 'Weighted AUROC', 'auroc')

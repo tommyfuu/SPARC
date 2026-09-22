@@ -40,7 +40,7 @@ after which `import sparc_paths` and `from data_loaders_inf_risk_fixed import *`
 both work from any working directory.
 
 Why a walk rather than a fixed number of dirname() calls: scripts in this repo
-sit at three different depths (model_train/, results_vis/test_fixed_060726/,
+sit at three different depths (model_train/, results_vis/,
 interpretation/interp_fix_0622626/lime/), and files get moved between them.
 """
 
@@ -80,6 +80,13 @@ RESULTS_ROOT = os.environ.get(
 # the two must stay a matched pair.
 SPARC_MODEL_ROOT = os.environ.get(
     'SPARC_060726_MODEL_PATH', RESULTS_ROOT + '_060726')
+
+# Side-effect models retrained with -wbce False (unweighted BCE), used as the
+# 'vanilla' arm of design choice 1. Transferred from lilac
+# /data/morrisq/fuc/SPARC_fixed_models_092126.
+SPARC_MODEL_ROOT_VANILLA = os.environ.get(
+    'SPARC_MODEL_ROOT_VANILLA',
+    os.path.join(os.path.dirname(SPARC_MODEL_ROOT), 'SPARC_fixed_models_092126'))
 
 # ---------------------------------------------------------------------------
 # Derived locations. Each is independently overridable, because some of them

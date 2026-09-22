@@ -8,8 +8,8 @@ C-index panel. Medications are ordered by positive-sample ratio; bars are mean
 Reads the CSVs from design_choice_comparison_2_all_vs_singlemeds.py.
 
 Usage:
-    python vis_design_choice_2_all_vs_singlemeds_060826_bar_horizontal.py
-    python vis_design_choice_2_all_vs_singlemeds_060826_bar_horizontal.py --dataset MSK_CAIA_timeshift
+    python vis_design_choice_2_all_vs_singlemeds_bar_horizontal.py
+    python vis_design_choice_2_all_vs_singlemeds_bar_horizontal.py --dataset MSK_CAIA_timeshift
 """
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
@@ -66,9 +66,7 @@ def paired_test(vals1, vals2):
         return float('nan')
 
 
-# ============================================================
 # Argument parsing
-# ============================================================
 parser = argparse.ArgumentParser(description='Horizontal bar chart: All Meds vs Single Med comparison')
 parser.add_argument('--dataset', type=str, default='MSK',
                     help='Dataset name (default: MSK)')
@@ -81,19 +79,19 @@ parser.add_argument('--stat_test', type=str, default='wilcoxon',
                          "'ttest_ind' are the UNPAIRED tests this script used previously, kept "
                          "to reproduce the old figures. A non-default choice is appended to the "
                          "output filename.")
+parser.add_argument('--save_dir', type=str, default=None,
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
 args = parser.parse_args()
 STAT_TEST = args.stat_test
 
 dataset = args.dataset
 modules = args.modules
 
-# ============================================================
 # Configuration
-# ============================================================
 all_model_path = sparc_paths.SPARC_MODEL_ROOT
 results_subfolder = 'results_vis_060726'
 csv_dir = f'{all_model_path}/{results_subfolder}/design_choices_2_all_vs_singlemeds'
-save_dir = csv_dir
+save_dir = args.save_dir if args.save_dir else csv_dir
 os.makedirs(save_dir, exist_ok=True)
 
 # Define the 5 side effect tasks
@@ -118,9 +116,7 @@ MODEL_HATCHES = {
     'Single Med': None,
 }
 
-# ============================================================
 # Helper functions
-# ============================================================
 def extract_medication(model_name):
     """Extract medication name from model name"""
     if model_name == 'all_meds':
@@ -141,9 +137,7 @@ def extract_model_type(model_name):
     else:
         return 'Unknown'
 
-# ============================================================
 # Process each task
-# ============================================================
 # Accumulate cleaned per-task frames for the combined data-summary export.
 _summary_frames = []
 
@@ -224,9 +218,7 @@ for task in SIDE_EFFECT_TASKS:
     print(f"Found {len(medications)} medications: {medications}")
     print(f"Positive ratios: {[(med, f'{med_info[med][2]*100:.1f}%') for med in medications if med in med_info]}")
 
-    # ============================================================
     # Create horizontal bar chart
-    # ============================================================
     n_meds = len(medications)
     bar_height = 0.35
     med_gap = 0.15
@@ -264,9 +256,7 @@ for task in SIDE_EFFECT_TASKS:
         # Move to next medication group
         current_y += len(models_to_plot) * bar_height + med_gap
 
-    # ============================================================
     # Plot AUROC (left subplot)
-    # ============================================================
     for med in medications:
         med_df = df[df['medication'] == med]
 
@@ -325,9 +315,7 @@ for task in SIDE_EFFECT_TASKS:
                          ha='left', va='center', fontsize=9,
                          alpha=0.6 if sig_txt == 'NS' else 1.0)
 
-    # ============================================================
     # Plot C-index (right subplot)
-    # ============================================================
     for med in medications:
         med_df = df[df['medication'] == med]
 
@@ -386,9 +374,7 @@ for task in SIDE_EFFECT_TASKS:
                           ha='left', va='center', fontsize=9,
                           alpha=0.6 if sig_txt == 'NS' else 1.0)
 
-    # ============================================================
     # Format axes
-    # ============================================================
     # Y-axis labels (medication names with sample info)
     y_ticks = [med_centers[med] for med in reversed(medications)]
     y_labels = []
@@ -451,9 +437,7 @@ for task in SIDE_EFFECT_TASKS:
     print(f"  {output_pdf}")
     print(f"  {output_png}")
 
-# ============================================================
 # Data summary export (aggregate all per-task CSVs into one)
-# ============================================================
 if _summary_frames:
     combined = pd.concat(_summary_frames, ignore_index=True)
 

@@ -70,38 +70,9 @@ add_num_infusion = args.add_num_infusion.lower() == 'true'
 
 
 # # Hardcoded values for testing
-# rseed = 1024
-# option_base = 'febrile_neutropenia'
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-
 # # Hardcoded values for testing
-# rseed = 1024
-# option_base = 'Liver_toxicity'
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = "IPILIMUMAB,ATEZOLIZUMAB,NIVOLUMAB,PEMBROLIZUMAB,AVELUMAB,CEMIPLIMAB,DOSTARLIMAB"
-# add_num_infusion = True
-
 # # Hardcoded values for testing - early
-# rseed = 1024
-# option_base = 'anemia'
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-
 # # Hardcoded values for testing - early
-# rseed = 1024
-# option_base = 'neutropenia'
-# modules = 'parsimonious'
-# dataset = 'MSK'
-# med_of_choice = 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL'
-# add_num_infusion = True
-
-
 if not bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option_base)):
     raise ValueError(f"Invalid option: {option_base}. Must be one of 'anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', or 'Liver_toxicity'.")
 
@@ -400,20 +371,6 @@ for model_name, config in model_configs.items():
                 fail_indicators = torch.as_tensor(y[0], device=device)
                 time_to_event = torch.as_tensor(y[1], device=device)
 
-                # # Debug: Print first batch info
-                # if batch_count == 0:
-                #     print(f"\n=== DEBUG: First Batch Info ===")
-                #     # print(y.shape, y)
-                #     print(f"y[0] type: {type(y[0])}, shape/value: {y[0] if not torch.is_tensor(y[0]) else y[0].shape}")
-                #     print(f"y[1] type: {type(y[1])}, shape/value: {y[1] if not torch.is_tensor(y[1]) else y[1].shape}")
-                #     print(f"fail_indicators shape: {fail_indicators.shape}")
-                #     print(f"time_to_event shape: {time_to_event.shape}")
-                #     print(f"y_pred_logits shape: {y_pred_logits.shape}")
-                #     print(f"num_infusion shape: {num_infusion.shape}")
-                #     print(f"First 3 fail_indicators: {fail_indicators[:3] if fail_indicators.numel() > 0 else fail_indicators}")
-                #     print(f"First 3 time_to_event: {time_to_event[:3] if time_to_event.numel() > 0 else time_to_event}")
-                #     print(f"First 3 num_infusion: {num_infusion[:3] if num_infusion.numel() > 0 else num_infusion}")
-                #     print("="*50 + "\n")
 
                 # Ensure tensors are at least 1D
                 if fail_indicators.dim() == 0:
@@ -429,12 +386,6 @@ for model_name, config in model_configs.items():
 
                 batch_count += 1
 
-        # print(f"\n=== DEBUG: Pre-concatenation Info ===")
-        # print(f"Number of batches: {batch_count}")
-        # print(f"Sample shapes from all_y_events: {[t.shape for t in all_y_events[:3]]}")
-        # print(f"Sample shapes from all_time_to_events: {[t.shape for t in all_time_to_events[:3]]}")
-        # print(f"Sample shapes from all_y_preds: {[t.shape for t in all_y_preds[:3]]}")
-        # print("="*50 + "\n")
 
         # Concatenate all batches
         all_y_preds = torch.cat(all_y_preds, dim=0)
@@ -450,27 +401,6 @@ for model_name, config in model_configs.items():
                 f"N: {len(all_y_preds)}")
         ### DEBUGGING ##
 
-        # # Print summary statistics
-        # print(f"\n=== DEBUG: Dataset Summary Statistics ===")
-        # print(f"Total samples: {len(all_y_events)}")
-        # print(f"Positive events (fail_indicators=1): {(all_y_events == 1).sum().item()} ({100 * (all_y_events == 1).float().mean().item():.2f}%)")
-        # print(f"Negative events (fail_indicators=0): {(all_y_events == 0).sum().item()} ({100 * (all_y_events == 0).float().mean().item():.2f}%)")
-        # print(f"\nTime to event statistics:")
-        # print(f"  Min: {all_time_to_events.min().item():.2f}")
-        # print(f"  Max: {all_time_to_events.max().item():.2f}")
-        # print(f"  Mean: {all_time_to_events.float().mean().item():.2f}")
-        # print(f"  Median: {all_time_to_events.float().median().item():.2f}")
-        # print(f"\nNumber of infusions statistics:")
-        # print(f"  Min: {all_num_infusions.min().item()}")
-        # print(f"  Max: {all_num_infusions.max().item()}")
-        # print(f"  Mean: {all_num_infusions.float().mean().item():.2f}")
-        # print(f"  Median: {all_num_infusions.float().median().item():.2f}")
-        # print(f"\nPrediction statistics:")
-        # print(f"  Min: {all_y_preds.min().item():.4f}")
-        # print(f"  Max: {all_y_preds.max().item():.4f}")
-        # print(f"  Mean: {all_y_preds.mean().item():.4f}")
-        # print(f"  Median: {all_y_preds.median().item():.4f}")
-        # print("="*50 + "\n")
 
         # Evaluate on the entire test dataset
         c_idx_dict = calculate_weighted_c_index_by_infusion(
