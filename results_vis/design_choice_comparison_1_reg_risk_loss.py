@@ -5,7 +5,6 @@ import pandas as pd
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir)
-import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
@@ -27,14 +26,10 @@ from SPARC_inf_risk_modular import *  # Use the 060726 version
 # Import module tokenizer config builder for use_module_tokenizer=True
 from MSK_featurename_list import build_module_index_config
 
-import json
-import ast
 data_source_path=sparc_paths.DATA_ROOT + '/'
 
 # python3 across_SPARC_att_risk_comparison.py -o AKI -ds MSK -m practical  -me "CISPLATIN"  -an True   -r 1024
 
-from torchsurv.metrics.cindex import ConcordanceIndex
-from torchmetrics import AUROC, F1Score, AveragePrecision, Accuracy, Precision, Recall
 
 torch.use_deterministic_algorithms(True, warn_only=True)
 torch.backends.cudnn.deterministic = True
