@@ -52,7 +52,7 @@ from scipy.stats import mannwhitneyu, fisher_exact
 from sklearn.calibration import calibration_curve
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
-from statsmodels.stats.proportion import proportion_confint
+from sklearn.preprocessing import StandardScaler
 
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 # repo root: interpretation/interp_fix_0622626/gcsf_analysis -> up 3 levels
@@ -393,6 +393,37 @@ else:
     print("PSM ANALYSIS WILL BE PERFORMED")
     print("="*80 + "\n")
 
+def _bootstrap_arr_nnt_ci(gcsf_outcomes, no_gcsf_outcomes, n_boot=2000, alpha=0.05, seed=0):
+    """Nonparametric bootstrap 95% CI for the ARR (no-G-CSF rate minus G-CSF
+    rate) and the resulting NNT.
+
+    Each group is resampled independently with replacement (this treats the
+    two groups as independent samples; it is not a paired/matched-pairs
+    bootstrap). The NNT CI is the percentile CI of 1/ARR taken over the
+    bootstrap replicates where ARR > 0; if the ARR CI itself doesn't clear
+    zero, the NNT CI is reported as not estimable (NaN), matching how NNT is
+    undefined when the treatment effect isn't clearly beneficial.
+    """
+    rng = np.random.default_rng(seed)
+    gcsf_outcomes = np.asarray(gcsf_outcomes)
+    no_gcsf_outcomes = np.asarray(no_gcsf_outcomes)
+    n_g, n_ng = len(gcsf_outcomes), len(no_gcsf_outcomes)
+
+    arr_boot = np.empty(n_boot)
+    for b in range(n_boot):
+        gr_b  = rng.choice(gcsf_outcomes,    size=n_g,  replace=True).mean()
+        ngr_b = rng.choice(no_gcsf_outcomes, size=n_ng, replace=True).mean()
+        arr_boot[b] = ngr_b - gr_b
+
+    arr_lo, arr_hi = np.percentile(arr_boot, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    if arr_lo > 0:
+        nnt_boot = np.where(arr_boot > 0, 1.0 / arr_boot, np.nan)
+        nnt_lo, nnt_hi = np.nanpercentile(nnt_boot, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    else:
+        nnt_lo = nnt_hi = np.nan
+    return arr_lo, arr_hi, nnt_lo, nnt_hi
+
+
 # Helper function to run analysis and produce figures
 def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, score_label, gcsf_lim,
                       reference_cutoffs=None, save_cutoffs=False, cutoffs_filepath=None, num_strata=5):
@@ -593,9 +624,6 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
         gcsf_with    = int((gcsf_group['outcome']    == 1).sum()) if n_g  > 0 else 0
         no_gcsf_with = int((no_gcsf_group['outcome'] == 1).sum()) if n_ng > 0 else 0
 
-        gcsf_ci    = proportion_confint(gcsf_with,    n_g,  method='wilson') if n_g  > 0 else (np.nan, np.nan)
-        no_gcsf_ci = proportion_confint(no_gcsf_with, n_ng, method='wilson') if n_ng > 0 else (np.nan, np.nan)
-
         if n_g > 0 and n_ng > 0:
             arr        = ngr - gr
             rrr        = arr / ngr if ngr > 0 else 0
@@ -604,19 +632,12 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
                                               [no_gcsf_with, n_ng - no_gcsf_with]])
             nnt = 1 / arr if arr > 0 else np.inf
 
-            # 95% CI for the ARR via the Newcombe method (difference of two
-            # independent Wilson intervals), then invert the ARR CI bounds to
-            # obtain the NNT CI. When the ARR CI crosses zero the NNT CI is
-            # undefined in the usual sense (it spans NNT-to-benefit through
-            # infinity into NNT-to-harm), so we flag those bounds as NaN.
-            arr_lower = no_gcsf_ci[0] - gcsf_ci[1]
-            arr_upper = no_gcsf_ci[1] - gcsf_ci[0]
-            if arr_lower > 0:
-                nnt_ci_lower = 1 / arr_upper
-                nnt_ci_upper = 1 / arr_lower
-            else:
-                nnt_ci_lower = np.nan
-                nnt_ci_upper = np.nan
+            # Nonparametric bootstrap CI for ARR and NNT (see
+            # _bootstrap_arr_nnt_ci), replacing the earlier Wilson-interval
+            # based approach.
+            arr_lower, arr_upper, nnt_ci_lower, nnt_ci_upper = _bootstrap_arr_nnt_ci(
+                gcsf_group['outcome'].to_numpy(), no_gcsf_group['outcome'].to_numpy()
+            )
         else:
             arr = rrr = rr = odds_ratio = p_val = nnt = np.nan
             arr_lower = arr_upper = nnt_ci_lower = nnt_ci_upper = np.nan
@@ -626,11 +647,7 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
             'n_gcsf':                   n_g,
             'n_no_gcsf':                n_ng,
             'gcsf_outcome_rate':        gr,
-            'gcsf_ci_lower':            gcsf_ci[0],
-            'gcsf_ci_upper':            gcsf_ci[1],
             'no_gcsf_outcome_rate':     ngr,
-            'no_gcsf_ci_lower':         no_gcsf_ci[0],
-            'no_gcsf_ci_upper':         no_gcsf_ci[1],
             'absolute_risk_reduction':  arr,
             'arr_ci_lower':             arr_lower,
             'arr_ci_upper':             arr_upper,
@@ -647,21 +664,21 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
 
         print(f"\n{'='*60}\n{stratum}\n{'='*60}")
         if n_g > 0:
-            print(f"G-CSF:    n={n_g}, outcome rate={gr:.3f} (95% CI: {gcsf_ci[0]:.3f}-{gcsf_ci[1]:.3f}), "
+            print(f"G-CSF:    n={n_g}, outcome rate={gr:.3f}, "
                   f"avg SPARC risk={gcsf_group['sparc_risk_score'].mean():.4f}")
         else:
             print(f"G-CSF:    n=0 (no data)")
         if n_ng > 0:
-            print(f"No G-CSF: n={n_ng}, outcome rate={ngr:.3f} (95% CI: {no_gcsf_ci[0]:.3f}-{no_gcsf_ci[1]:.3f}), "
+            print(f"No G-CSF: n={n_ng}, outcome rate={ngr:.3f}, "
                   f"avg SPARC risk={no_gcsf_group['sparc_risk_score'].mean():.4f}")
         else:
             print(f"No G-CSF: n=0 (no data)")
         if n_g > 0 and n_ng > 0:
-            print(f"ARR={arr:.3f} ({arr*100:.1f}%) [95% CI: {arr_lower:.3f} to {arr_upper:.3f}], "
+            print(f"ARR={arr:.3f} ({arr*100:.1f}%) [95% bootstrap CI: {arr_lower:.3f} to {arr_upper:.3f}], "
                   f"RRR={rrr:.3f}, RR={rr:.3f}, OR={odds_ratio:.3f}, p={p_val:.4f}")
             if nnt != np.inf and nnt > 0:
                 if not (np.isnan(nnt_ci_lower) or np.isnan(nnt_ci_upper)):
-                    print(f"NNT: {nnt:.1f} (95% CI: {nnt_ci_lower:.1f} to {nnt_ci_upper:.1f})")
+                    print(f"NNT: {nnt:.1f} (95% bootstrap CI: {nnt_ci_lower:.1f} to {nnt_ci_upper:.1f})")
                 else:
                     print(f"NNT: {nnt:.1f} (95% CI not estimable — ARR CI crosses 0)")
         else:
@@ -833,32 +850,25 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
         print(f"Saved NNT-by-stratum figure to {os.path.join(output_dir, nnt_fig)}")
         plt.close()
 
-    # Visualisation: outcome rates & ARR by stratum
+    # Visualisation: outcome rates by stratum
     if len(stratum_results) > 0:
         results_df = pd.DataFrame(stratum_results)
 
         # Horizontal grouped bars, styled to match the clinical-benchmark
-        # figure (vis_eval_7_clinical_benchmark_forest_plot_MSK.py): black-edged solid
-        # bars, separate black error bars, dashed value-axis grid, no top/right
-        # spines, legend below the axes. Both panels share the stratum axis, so
-        # they are flipped together.
+        # figure (vis_eval_7_clinical_benchmark_forest_plot_MSK.py): black-edged
+        # solid bars, dashed value-axis grid, no top/right spines, legend
+        # below the axes.
         n_str = len(results_df)
         y_pos = np.arange(n_str, dtype=float)
         # BAR_H is bar thickness, ROW_GAP the centre-to-centre spacing of the
         # two arms, so ROW_GAP - BAR_H is the visible gap between them (as in
         # the clinical-benchmark figure, which leaves 0.10 between bars).
         BAR_H, ROW_GAP = 0.32, 0.40
-        SIG_COL = '#555555'
-        fig, axes = plt.subplots(1, 2, figsize=(15, max(5.0, 1.15 * n_str + 2.4)))
+        fig, ax1 = plt.subplots(figsize=(9, max(5.0, 1.15 * n_str + 2.4)))
 
         # Two lines: "Stratum k" over its score range, which is too long inline.
         strat_labels = [s.replace(' (', '\n(') for s in results_df['stratum']]
 
-        ax1 = axes[0]
-        ge_lo = np.nan_to_num(np.maximum(0, results_df['gcsf_outcome_rate']    - results_df['gcsf_ci_lower']))
-        ge_hi = np.nan_to_num(np.maximum(0, results_df['gcsf_ci_upper']        - results_df['gcsf_outcome_rate']))
-        ne_lo = np.nan_to_num(np.maximum(0, results_df['no_gcsf_outcome_rate'] - results_df['no_gcsf_ci_lower']))
-        ne_hi = np.nan_to_num(np.maximum(0, results_df['no_gcsf_ci_upper']     - results_df['no_gcsf_outcome_rate']))
         g_rate  = results_df['gcsf_outcome_rate'].fillna(0).to_numpy()
         ng_rate = results_df['no_gcsf_outcome_rate'].fillna(0).to_numpy()
 
@@ -866,10 +876,6 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
                  edgecolor='black', linewidth=0.9, label='G-CSF', zorder=2)
         ax1.barh(y_pos + ROW_GAP/2, ng_rate, height=BAR_H, color='#e74c3c',
                  edgecolor='black', linewidth=0.9, label='No G-CSF', zorder=2)
-        ax1.errorbar(g_rate, y_pos - ROW_GAP/2, xerr=[ge_lo, ge_hi], fmt='none',
-                     ecolor='black', elinewidth=1.1, capsize=3, capthick=1.1, zorder=3)
-        ax1.errorbar(ng_rate, y_pos + ROW_GAP/2, xerr=[ne_lo, ne_hi], fmt='none',
-                     ecolor='black', elinewidth=1.1, capsize=3, capthick=1.1, zorder=3)
 
         outcome_label = 'Febrile neutropenia' if 'febrile' in option else 'Neutropenia'
         ax1.set_xlabel(f'{outcome_label} rate (%)', fontsize=12)
@@ -884,12 +890,11 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
         ax1.legend(loc='upper center', bbox_to_anchor=(0.5, -0.09), ncol=2,
                    fontsize=10, frameon=False, handlelength=1.4, columnspacing=2.0)
 
-        ci_upper_vals = pd.concat([results_df['gcsf_ci_upper'], results_df['no_gcsf_ci_upper']]).dropna()
-        y_max = ci_upper_vals.max() if len(ci_upper_vals) > 0 else 1.0
+        rate_max = max(g_rate.max(), ng_rate.max())
         # Headroom for the n/p annotation column at the right edge. Needs to
         # clear the longest label ("n=NNNN/NNNN, p<0.001***") without it
-        # overlapping the widest CI cap.
-        x_hi  = min(max(y_max * 1.55, y_max + 0.12), 1.0)
+        # overlapping the tallest bar.
+        x_hi  = min(max(rate_max * 1.55, rate_max + 0.12), 1.0)
         sig_x = x_hi - 0.01 * (x_hi - 0)
         ax1.set_xlim(0, x_hi)
 
@@ -900,43 +905,17 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
             else:
                 p_text = ('p<0.001***' if pv < 0.001 else f'p={pv:.3f}**' if pv < 0.01
                           else f'p={pv:.3f}*' if pv < 0.05 else f'p={pv:.2f}')
-            # Fixed column at the right edge rather than trailing each CI, so
+            # Fixed column at the right edge rather than trailing each bar, so
             # the annotations line up (matches the clinical-benchmark figure).
             ax1.text(sig_x, y_pos[i], f'n={int(n_g)}/{int(n_ng)}, {p_text}',
                      ha='right', va='center', fontsize=8, fontweight='bold',
                      color='black')
 
-        ax2 = axes[1]
-        arr_vals = results_df['absolute_risk_reduction'].fillna(0).to_numpy()
-        colors = ['#e74c3c' if x < 0 else '#2ecc71' for x in arr_vals]
-        ax2.barh(y_pos, arr_vals, height=0.52, color=colors,
-                 edgecolor='black', linewidth=0.9, zorder=2)
-        ax2.axvline(0, color='black', linestyle='-', linewidth=0.8, zorder=1)
-        ax2.set_xlabel('Absolute risk reduction', fontsize=12)
-        ax2.set_title('G-CSF treatment effect (ARR)', fontsize=13, pad=12, loc='left')
-        ax2.set_yticks(y_pos); ax2.set_yticklabels(strat_labels, fontsize=11)
-        ax2.tick_params(axis='y', length=0)
-        ax2.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.3, zorder=0)
-        ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
-        ax2.invert_yaxis()
-
-        v_abs_min = max(np.abs(arr_vals).min(), 1e-6)
-        for i, (v, pv) in enumerate(zip(arr_vals, results_df['p_value'])):
-            if pd.isna(pv):
-                label = f'{v:.3f} (n/a)'
-            else:
-                sig = '***' if pv < 0.001 else '**' if pv < 0.01 else '*' if pv < 0.05 else ''
-                label = f'{v:.3f}{sig}'
-            ax2.text(v + (v_abs_min * 0.2 if v >= 0 else -v_abs_min * 0.2), y_pos[i],
-                     label, ha='left' if v >= 0 else 'right', va='center',
-                     fontsize=9, color=SIG_COL)
-        ax2.margins(x=0.22)
-
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir,
             f'sparc_gcsf_effect_by_risk_stratum_{score_label}_{option}_{dataset}{tag}{output_suffix}.pdf'),
             bbox_inches='tight', dpi=300)
-        print("Saved treatment effect figure.")
+        print("Saved outcome rate figure.")
 
     # Calibration plot (risk score vs observed outcome rate) with per-fold CIs
     print("\n" + "="*80)
@@ -1267,18 +1246,29 @@ if run_psm:
     print(f"Train set G-CSF: {y_train_gcsf.sum()} / {len(y_train_gcsf)} ({y_train_gcsf.mean()*100:.1f}%)")
     print(f"Test set G-CSF: {y_test_gcsf.sum()} / {len(y_test_gcsf)} ({y_test_gcsf.mean()*100:.1f}%)")
     
-    # Build logistic regression model to predict G-CSF usage from raw features
+    # Build logistic regression model to predict G-CSF usage from raw features.
+    # The raw features are on wildly different scales (lab values, day
+    # counts, 0/1 masks, infusion counts), which left lbfgs unable to
+    # converge (ConvergenceWarning) and landing at whatever point floating-
+    # point noise put it after max_iter — i.e. not reproducible run-to-run.
+    # Standardizing puts sklearn's default (scale-dependent) L2 penalty on
+    # equal footing across features and lets the optimizer actually reach a
+    # real optimum.
     print("\nBuilding logistic regression model to predict G-CSF usage from raw patient features...")
+    ps_scaler = StandardScaler()
+    X_train_scaled = ps_scaler.fit_transform(X_train_raw)
+    X_test_scaled = ps_scaler.transform(X_test_raw)
+
     ps_model = LogisticRegression(random_state=rseed, max_iter=1000, solver='lbfgs')
-    ps_model.fit(X_train_raw, y_train_gcsf)
-    
+    ps_model.fit(X_train_scaled, y_train_gcsf)
+
     print(f"Propensity score model trained with {X_train_raw.shape[1]} features")
     print(f"Number of non-zero coefficients: {np.sum(ps_model.coef_ != 0)}")
-    
+
     # Evaluate propensity score model on test set
     from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
-    y_test_gcsf_pred_proba = ps_model.predict_proba(X_test_raw)[:, 1]
-    y_train_gcsf_pred_proba = ps_model.predict_proba(X_train_raw)[:, 1]
+    y_test_gcsf_pred_proba = ps_model.predict_proba(X_test_scaled)[:, 1]
+    y_train_gcsf_pred_proba = ps_model.predict_proba(X_train_scaled)[:, 1]
     
     train_ps_auroc = roc_auc_score(y_train_gcsf, y_train_gcsf_pred_proba)
     train_ps_auprc = average_precision_score(y_train_gcsf, y_train_gcsf_pred_proba)
