@@ -506,8 +506,8 @@ def _explain_one(instance_vec, explainer, lime_wrapper, flat_feature_names, num_
 
 # LIME COMPUTATION — iterate over folds
 
-across_folds_lime_values    = []   # [num_folds, T, F-1]   (mask col removed)
-num_infusion_values         = []   # [num_folds, num_infusion_dim]
+across_folds_lime_values      = []   # [num_folds, T, F-1]   (mask col removed), SIGNED (mean over instances)
+num_infusion_values           = []   # [num_folds, num_infusion_dim]
 
 for val_fold in fold_range:
     print(f"\n{'='*60}")
@@ -752,9 +752,14 @@ for val_fold in fold_range:
 
 # AGGREGATE ACROSS FOLDS
 
-across_folds_lime_values = np.array(across_folds_lime_values)  # [num_folds, T, n_actual]
+across_folds_lime_values = np.array(across_folds_lime_values)  # [num_folds, T, n_actual], signed
 
 # With time stamp (last column of n_actual is the time stamp)
+# mean-then-abs: average the signed value over instances first (per fold),
+# THEN take the absolute value -- matches visualize_temporal_dependency_clarified.py's
+# current convention. Note this lets patients with opposite-sign LIME
+# contributions at the same timepoint/feature cancel out before the
+# magnitude is taken.
 lime_values_avg      = across_folds_lime_values.mean(axis=0)                          # [T, n_actual]
 lime_values_avg_T    = np.abs(across_folds_lime_values).mean(axis=(0, 2))             # [T]
 # Weighted average over timepoints using timepoint importance as weights
@@ -762,7 +767,7 @@ _abs_avg_folds       = np.abs(across_folds_lime_values).mean(axis=0)            
 lime_values_avg_F    = np.average(_abs_avg_folds, axis=0, weights=lime_values_avg_T)  # [n_actual]
 
 # Without time stamp (drop the last column of n_actual = base_features)
-lime_values_wotime   = across_folds_lime_values[:, :, :-1]                            # [num_folds, T, base_features]
+lime_values_wotime   = across_folds_lime_values[:, :, :-1]                            # [num_folds, T, base_features], signed
 lime_values_avg_wt   = lime_values_wotime.mean(axis=0)                                # [T, base_features]
 lime_values_avg_T_wt = np.abs(lime_values_wotime).mean(axis=(0, 2))                   # [T]
 # Weighted average over timepoints using timepoint importance as weights
@@ -829,21 +834,32 @@ def plot_lime_values(
     ax_bot  = fig.add_subplot(gs[1, 1])
     cax     = fig.add_subplot(gs[0, 2])
 
-    # Time importance (left)
-    ax_left.imshow(np.expand_dims(lime_values_avg_T, axis=1),
-                   aspect='auto', cmap='Greys', interpolation='nearest')
-    ax_left.set_yticks(range(len(lime_values_avg_T)))
-    ax_left.set_yticklabels(range(len(lime_values_avg_T)))
+    # Time importance (left) — drawn as vector polygons (pcolormesh), not a
+    # raster image, so it stays sharp when the PDF is scaled/zoomed (e.g. in
+    # Illustrator).
+    t_arr = np.asarray(lime_values_avg_T).reshape(-1, 1)
+    tv = float(np.nanmax(t_arr)) or 1.0
+    ax_left.pcolormesh(
+        np.arange(2), np.arange(len(t_arr) + 1),
+        t_arr, cmap='Greys', vmin=0, vmax=tv,
+        shading='flat', edgecolors='none', rasterized=False,
+    )
+    ax_left.invert_yaxis()
+    ax_left.set_yticks(np.arange(len(t_arr)) + 0.5)
+    ax_left.set_yticklabels(range(len(t_arr)))
     ax_left.set_xticks([])
     ax_left.set_title('Time\nImportance', fontsize=10)
     ax_left.tick_params(left=False)
 
-    # Main LIME heatmap
-    im0 = ax_main.imshow(
-        lime_plot, aspect='auto', cmap='coolwarm',
-        interpolation='nearest', vmin=vmin, vmax=vmax,
-        extent=[0, n_f, n_t, 0],
+    # Main LIME heatmap — drawn as vector polygons (pcolormesh), not a raster
+    # image, so it stays sharp when the PDF is scaled/zoomed (e.g. in
+    # Illustrator), same as the Time/Feature importance panels above.
+    im0 = ax_main.pcolormesh(
+        np.arange(n_f + 1), np.arange(n_t + 1),
+        lime_plot, cmap='coolwarm', vmin=vmin, vmax=vmax,
+        shading='flat', edgecolors='none', rasterized=False,
     )
+    ax_main.invert_yaxis()
     title = f'LIME values (avg across {n_folds_used} folds, all patients){title_suffix}'
     ax_main.set_title(title, fontsize=11)
     ax_main.set_xticks([])
@@ -857,12 +873,15 @@ def plot_lime_values(
             linewidth=2, edgecolor='black', facecolor='none', linestyle='--')
         ax_main.add_patch(rect)
 
-    # Feature importance (bottom)
-    ax_bot.imshow(
-        np.expand_dims(lime_F_plot, axis=0), aspect='auto',
-        cmap='Greys', interpolation='nearest',
-        extent=[0, n_f, 1, 0],
+    # Feature importance (bottom) — same vector-polygon approach as above.
+    f_row = np.asarray(lime_F_plot).reshape(1, -1)
+    fv = float(np.nanmax(f_row)) or 1.0
+    ax_bot.pcolormesh(
+        np.arange(n_f + 1), np.arange(2),
+        f_row, cmap='Greys', vmin=0, vmax=fv,
+        shading='flat', edgecolors='none', rasterized=False,
     )
+    ax_bot.set_ylim(1, 0)
     ax_bot.set_yticks([0.5])
     ax_bot.set_yticklabels(['Feature\nImportance'])
     ax_bot.set_xticks(np.arange(len(feat_plot)) + 0.5)
