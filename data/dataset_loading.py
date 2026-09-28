@@ -23,7 +23,6 @@ import os
 import sys
 import re
 import copy
-import json
 import math
 import pickle
 import random
@@ -36,6 +35,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
+from bundle_io import read_bundle
 from MSK_featurename_list import (
     ALL_INCLUDED_TESTS, BASIC_TESTS, BASIC_TESTS_INDICES,
     EXTRA_TESTS, EXTRA_TESTS_INDICES,
@@ -279,13 +279,8 @@ def _resolve_modules(modules):
 
 
 def _load_caia(dataset, data_source_path, caia_portion='prior', med_regimen_eval=False):
-    """Load the CAIA JSON bundle as a dict of sub-dicts, cut to caia_portion ('prior', 'post', 'entire').
-    med_regimen_eval=True loads the unfiltered meds."""
-    def custom_decoder(d):
-        if "__set__" in d:
-            return set(d["__set__"])
-        return d
-
+    """Load the CAIA bundle (JSON, pickle, CSV or Parquet; see bundle_io.py) as a dict of sub-dicts,
+    cut to caia_portion ('prior', 'post', 'entire'). med_regimen_eval=True loads the unfiltered meds."""
     if dataset == 'MSK_CAIA':
         data_path = f'{data_source_path}/{dataset}/DMP_ID_to_dicts_final_till2021_031226.json'
         # data_path = f'{data_source_path}/{dataset}/DMP_ID_to_dicts_final_till2021_050726.json'
@@ -293,15 +288,12 @@ def _load_caia(dataset, data_source_path, caia_portion='prior', med_regimen_eval
         data_path = f'{data_source_path}/{dataset}/DMP_ID_to_dicts_final_after2021_031226.json'
         # data_path = f'{data_source_path}/{dataset}/DMP_ID_to_dicts_final_after2021_050726.json'
     else:
-        data_path = f'{data_source_path}/{dataset}/DMP_ID_to_dicts_final.json'
-        # check if this exists, if not, raise error
-        if not os.path.exists(data_path):
-            raise ValueError(f"CAIA dataset JSON file not found at expected path: {data_path}")
-    # else:
-    #     raise ValueError(f"Unknown CAIA dataset: {dataset}. Expected 'MSK_CAIA' or 'MSK_CAIA_timeshift'")
+        # DMP_ID_to_dicts_final.json / .pkl, or CSV/Parquet tables (see bundle_io.py)
+        data_path = f'{data_source_path}/{dataset}'
+        if not os.path.isdir(data_path):
+            raise ValueError(f"CAIA dataset directory not found at expected path: {data_path}")
 
-    with open(data_path, 'r') as f:
-        raw = json.load(f, object_hook=custom_decoder)
+    raw = read_bundle(data_path)
 
     shared = {
         'hospital':  {int(k): v for k, v in raw['DMP_ID_to_inpatient_dates_dict_delta'].items()},
@@ -1203,14 +1195,16 @@ def _normalize(dataset, data_source_path, modules, data_dict_lab_dict, first_pri
                             fval = np.nan
                         feature_dict[pid][d][test_idx] = (fval - mean) / std if std > 0 else 0.0
 
-        # Save cache only if not first-principle
+        # Save cache only if not first-principle. Write to a temporary file and rename, so
+        # parallel runs (e.g. a SLURM array over folds) never read a partly written cache.
         if use_cache:
-            if not os.path.exists(norm_factor_path):
-                with open(norm_factor_path, 'wb') as f:
-                    pickle.dump(normalization_factor_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-            if not os.path.exists(normalized_data_path):
-                with open(normalized_data_path, 'wb') as f:
-                    pickle.dump(data_dict_lab_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+            for path, obj in [(norm_factor_path, normalization_factor_dict),
+                              (normalized_data_path, data_dict_lab_dict)]:
+                if not os.path.exists(path):
+                    tmp = f'{path}.{os.getpid()}.tmp'
+                    with open(tmp, 'wb') as f:
+                        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    os.replace(tmp, path)
     else:
         # Load from cache (only for non-first-principle runs)
         print("loading existing normalized data_dict_lab_dict")

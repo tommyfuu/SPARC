@@ -1,6 +1,19 @@
 # SPARC
 Code repository for SPARC: Longitudinal AI Models Predict Cancer Adverse Events
 
+## Install
+
+```bash
+pip install -e .            # installs the `sparc` command
+```
+
+`sparc train` and `sparc eval` run `model_train/SPARC_train_inf_risk_fixed.py`, so they take
+its flags, or a YAML config (`examples/`). Input data can be the original JSON bundle
+(`DMP_ID_to_dicts_final.json`), the same bundle pickled, or CSV or Parquet tables (`patients`,
+`labs`, `vitals`, `medications`, `admissions`; SPARC_dep package/v1 tables also load). The
+documentation (`pip install -e ".[docs]" && mkdocs serve`; published to GitHub Pages from
+`main`) covers the formats, a demo on synthetic data, training, inference and SLURM.
+
 ## Layout
 
 ```
@@ -12,6 +25,10 @@ hyperparam_tune/        benchmark hyperparameter search
 results_vis/            evaluations (eval_*), design-choice ablations, and figures (vis_*)
 interpretation/         LIME feature importance and treatment-effect analyses
 cohort_summaries/       descriptive statistics and Table 1
+src/sparc_clinical/     the `sparc` command and Python package, a thin layer over the code above
+tests/                  pytest suite (`pytest`), runs on CPU with synthetic data
+docs/, mkdocs.yml       documentation site
+examples/               YAML configs and SLURM scripts for pretraining, finetuning and inference
 ```
 
 Every path lives in `sparc_paths.py` and can be redirected without editing code:
@@ -29,6 +46,7 @@ Most scripts also take `-dsp`, `-mp` and `-rp`/`-op` to override the same roots 
 | file | what it does |
 |---|---|
 | `dataset_loading.py` | `load_dataset()` — the single entry point every script uses to load a cohort |
+| `bundle_io.py` | reads and writes the `*_CAIA` patient bundle as JSON, pickle, CSV or Parquet |
 | `data_loaders_inf_risk_fixed.py` | `FlexibleFeatureDataModule` / `FlexibleFeatureDataset`: turns per-patient records into model tensors |
 | `data_loader_side_effect_infusions_utils_risk_fixed.py` | side-effect label construction (event, time-to-event, infusion number) |
 | `MSK_featurename_list.py` | the canonical feature lists and module definitions |
@@ -73,7 +91,8 @@ python3 TabPFNv3_benchmarks_train_risk_corrected_fixed.py -mo temporal_tabpfn -d
 ```
 
 `-s pretrain | finetune`, `-f` is the fold (1-10), `-umt`/`-uct`/`-wbce` switch the
-module tokenizer, continuous-time encoding and weighted BCE for the ablation arms.
+module tokenizer, continuous-time encoding and weighted BCE for the ablation arms. `-bs` sets
+the batch size and `-acc` the accelerator. Supervised runs also write `test_predictions.csv`.
 
 TabPFN v3 requires a one-time licence acceptance at <https://ux.priorlabs.ai> and
 `export TABPFN_TOKEN=...` before it can download model weights.

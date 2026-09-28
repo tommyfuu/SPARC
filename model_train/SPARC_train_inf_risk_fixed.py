@@ -4,6 +4,11 @@ import os
 import sys
 import copy
 
+# Lightning rejects a multi-task SLURM allocation without --ntasks-per-node, such as an
+# interactive OnDemand session; this job name makes it run as a plain local process there.
+if int(os.environ.get('SLURM_NTASKS', '1')) > 1 and 'SLURM_NTASKS_PER_NODE' not in os.environ:
+    os.environ['SLURM_JOB_NAME'] = 'interactive'
+
 import torch
 import numpy as np
 import pytorch_lightning as pl
@@ -25,6 +30,45 @@ def is_checkpoint_corrupted(ckpt_path):
     except Exception:
         return True
 
+
+def write_test_predictions(model, dataset, path, batch_size, seed):
+    """Write one row per test sample: patient id, prediction day, infusion number, label(s) and score.
+
+    With -bf False the encoder attends across the batch, so samples are scored in the shuffled
+    batches that trainer.test and the paper's evaluation use (seed_everything(seed), then a
+    shuffled loader), and written back in dataset order.
+    """
+    import pandas as pd
+    from pytorch_lightning.utilities import move_data_to_device
+    from torch.utils.data import DataLoader, Subset
+    def as_columns(y):   # *_risk labels arrive as [event, time_to_event] tensors
+        if isinstance(y, (list, tuple)):
+            return torch.stack([torch.as_tensor(v).reshape(-1).float() for v in y], dim=1)
+        return torch.as_tensor(y).reshape(-1, 1).float()
+
+    pl.seed_everything(seed)
+    order = torch.cat(list(DataLoader(range(len(dataset)), batch_size=batch_size, shuffle=True)))
+    back = torch.argsort(order)
+    model.eval()
+    with torch.no_grad():
+        outputs = [model.predict_step(move_data_to_device(batch, model.device), i)
+                   for i, batch in enumerate(DataLoader(Subset(dataset, order.tolist()), batch_size=batch_size))]
+    scores = torch.cat([o['y_pred'].reshape(-1).float().cpu() for o in outputs])[back].numpy()
+    labels = torch.cat([as_columns(o['y_true']).cpu() for o in outputs])[back].numpy()
+    df = pd.DataFrame({'patient_id': dataset.dataset_DMP_IDs})
+    if len(getattr(dataset, 'cutoffdates', [])) == len(df):
+        df['prediction_day'] = dataset.cutoffdates
+    if outputs[0].get('num_infusion') is not None:
+        infusions = torch.cat([torch.as_tensor(o['num_infusion']).reshape(-1) for o in outputs])
+        df['infusion_num'] = infusions[back].numpy()
+    if labels.shape[1] == 2:
+        df['event'], df['time_to_event'] = labels[:, 0], labels[:, 1]
+    else:
+        df['label'] = labels[:, 0]
+    df['score'] = scores
+    df.to_csv(path, index=False)
+    print(f"wrote {len(df)} test predictions to {path}")
+
 # put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
@@ -45,8 +89,7 @@ from SPARC_inf_risk_modular import *
 import argparse
 parser = argparse.ArgumentParser(
     prog='SPARC_train',
-    description='Train the basic/extra feature model',
-    epilog='Text at the bottom of help')
+    description='Pretrain, finetune or evaluate (-mo test) SPARC on one fold.')
 parser.add_argument("-r",   "--rseed",                   type=int,                              default=1024,        help='random seed')
 parser.add_argument("-f",   "--valfold",                 type=int,                              default=1,           help='fold number for validation (1-10)')
 parser.add_argument("-s",   "--scheme",                  type=str,                              default='pretrain',  help='pretrain | finetune')
@@ -82,6 +125,8 @@ parser.add_argument("-pmd", "--post_mlp_dropout",        type=float,            
 parser.add_argument("-traw","--time_as_raw_feature",     type=str,                              default='False',     help='True | False — feed elapsed time as a raw scalar through a linear map. Use with -uct False to test time-as-feature WITHOUT the Fourier embedding.')
 parser.add_argument("-bf",  "--batch_first",             type=str,                              default='True',     help='True | False — build the transformer with batch_first=True so it attends over time (all reported models).')
 parser.add_argument("-wbce","--weighted_bce",            type=str,                              default='True',      help='True | False — use WeightedBCELoss (pos_weight=n_neg/n_pos) to handle class imbalance; False uses standard BCE')
+parser.add_argument("-bs",  "--batch_size",              type=int,                              default=512,         help='batch size (default 512)')
+parser.add_argument("-acc", "--accelerator",             type=str,                              default='auto',      help='auto | gpu | cpu — Lightning accelerator (auto uses a GPU when one is available)')
 
 #%%
 args = parser.parse_args()
@@ -142,7 +187,7 @@ med_of_choice = result_meds
 print("med_of_choice:", med_of_choice)
 
 # Hyperparameters
-batch_size = 512
+batch_size = args.batch_size
 
 # Override option when scheme == 'pretrain'
 if scheme == 'pretrain' and option != 'pretrain' and mode != 'test':
@@ -152,6 +197,13 @@ if scheme == 'pretrain' and option != 'pretrain' and mode != 'test':
 
 if valfold not in range(10):
     raise ValueError('valfold must be between 1 and 10 (11th fold is the held-out test set)')
+
+if mode == 'test':
+    # test only a model trained for this fold, never a pretrained or untrained one
+    fold_dir = f'{output_model_path}/fold{valfold}'
+    if not any(x.startswith('epoch=') and x.endswith('.ckpt')
+               for x in (os.listdir(fold_dir) if os.path.isdir(fold_dir) else [])):
+        raise FileNotFoundError(f"No trained checkpoint (epoch=*.ckpt) in {fold_dir}; train this fold first")
 
 # Load data
 print("Loading dataset …")
@@ -219,6 +271,9 @@ data_module = FlexibleFeatureDataModule(
 print("data module initiated")
 print(f"DEBUG: Train size={len(split_dict['train'])}, Val size={len(split_dict['val'])}, Test size={len(split_dict['test'])}")
 print(f"DEBUG: First 5 val IDs: {list(split_dict['val'])[:5]}")
+if len(data_module.test_dataset) == 0:
+    raise ValueError(f"No test samples for {option}: fold 10 has no patient with a usable sample, "
+                     f"or fewer than -bs/5 = {batch_size // 5}, which are dropped")
 
 # pos_weight for binary tasks
 binary_pos_weight = None
@@ -269,6 +324,7 @@ if modules in ['all', 'practical', 'parsimonious']:
     no_existing_checkpoint = (
         pretrained_model_path == ''
         and not os.path.exists(f'{output_model_path}/fold{valfold}/last.ckpt')
+        and mode != 'test'
     )
     if no_existing_checkpoint:
         print("initiating new model")
@@ -372,8 +428,8 @@ if modules in ['all', 'practical', 'parsimonious']:
                     batch_first=batch_first,
                     time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
-                                    binary_pos_weight=binary_pos_weight,
-            side_effects_pos_weight=side_effects_pos_weight,
+                    binary_pos_weight=binary_pos_weight,
+                    side_effects_pos_weight=side_effects_pos_weight,
                 )
             elif (not resuming_finetuning_checkpoint
                   and model_option in ['side_effects', 'side_effects_risk', 'side_effects_next_risk']
@@ -399,8 +455,8 @@ if modules in ['all', 'practical', 'parsimonious']:
                     batch_first=batch_first,
                     time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
-                                    binary_pos_weight=binary_pos_weight,
-            side_effects_pos_weight=side_effects_pos_weight,
+                    binary_pos_weight=binary_pos_weight,
+                    side_effects_pos_weight=side_effects_pos_weight,
                 )
             else:
                 print("standard load:", model_option, "add_num_infusion", add_num_infusion, "med_as_feature", med_as_feature)
@@ -424,8 +480,8 @@ if modules in ['all', 'practical', 'parsimonious']:
                     batch_first=batch_first,
                     time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
-                                    binary_pos_weight=binary_pos_weight,
-            side_effects_pos_weight=side_effects_pos_weight,
+                    binary_pos_weight=binary_pos_weight,
+                    side_effects_pos_weight=side_effects_pos_weight,
                 )
 
 
@@ -512,8 +568,8 @@ trainer = pl.Trainer(
     accumulate_grad_batches=10,
     gradient_clip_val=0.5,
     gradient_clip_algorithm='norm',
-    accelerator="gpu",
-    devices="auto",
+    accelerator=args.accelerator,
+    devices=1,   # the model does not support DDP (unused parameters)
 )
 pl.seed_everything(rseed)
 
@@ -606,3 +662,6 @@ model = SPARC.load_from_checkpoint(
 )
 pl.seed_everything(rseed)
 trainer.test(model, data_module.test_dataloader())
+if model_option != 'pretrain':
+    write_test_predictions(model, data_module.test_dataset,
+                           f'{output_model_path}/test_predictions.csv', batch_size, rseed)
