@@ -752,7 +752,7 @@ def run_gcsf_analysis(df_patients, output_suffix, output_dir, option, dataset, s
     if len(stratum_results) > 0:
         results_df = pd.DataFrame(stratum_results)
 
-        # styled to match vis_eval_7_clinical_benchmark_forest_plot_MSK.py
+        # styled to match vis_eval_5_clinical_benchmark_forest_plot_MSK.py
         n_str = len(results_df)
         y_pos = np.arange(n_str, dtype=float)
         # bar thickness, and centre-to-centre spacing of the two arms

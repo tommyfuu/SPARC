@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AUROC bar/forest plot: published clinical score vs retrained vs SPARC-P on 4 MSK
-tasks (AKI, anemia, febrile neutropenia, neutropenia), read from the eval_6 CSVs.
+tasks (AKI, anemia, febrile neutropenia, neutropenia), read from the eval_5 CSVs.
 --sparc_first puts SPARC on top of each task, then retrained, then published (files get _sparcfirst).
 """
 import os
