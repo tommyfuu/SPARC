@@ -24,7 +24,7 @@ class PositionalEncoding(nn.Module):
         self.max_time = max_time
         self.n_dim = n_dim
         self.num_timescales = n_dim // 2
-        
+
         # Precompute timescales
         self.timescales = max_time ** torch.linspace(0, 1, self.num_timescales)
 
@@ -63,7 +63,7 @@ class PositionalEncodingTF(nn.Module):
         pe = pe.cuda()
         return pe
 
-def nanstd(x): 
+def nanstd(x):
     return torch.sqrt(torch.nanmean((x - torch.nanmean(x))**2))
 def obprop_safe(ob_layer, stepdata, edge_index, edge_weights=None, edge_attr=None):
     """
@@ -73,11 +73,11 @@ def obprop_safe(ob_layer, stepdata, edge_index, edge_weights=None, edge_attr=Non
     Raindrop_v2's Observation_progation instead of a plain TransformerConv.)
     """
     if torch.isnan(stepdata).any():
-        print("⚠️ NaNs in stepdata — replacing with zeros")
+        print("WARNING: NaNs in stepdata — replacing with zeros")
         stepdata = torch.nan_to_num(stepdata, nan=0.0)
 
     if torch.all(stepdata == 0):
-        print("⚠️ stepdata is all zeros — skipping ob_propagation")
+        print("WARNING: stepdata is all zeros — skipping ob_propagation")
         dummy_out = torch.zeros_like(stepdata)
         dummy_weights = torch.zeros(edge_index.shape[1], 1, device=stepdata.device)
         return dummy_out, (edge_index, dummy_weights)
@@ -91,18 +91,18 @@ def obprop_safe(ob_layer, stepdata, edge_index, edge_weights=None, edge_attr=Non
             return_attention_weights=True
         )
     except Exception as e:
-        print("⚠️ ob_propagation failed — replacing with zeros")
+        print("WARNING: ob_propagation failed — replacing with zeros")
         print("Error:", e)
         out = torch.zeros_like(stepdata)
         attn = (edge_index, torch.zeros(edge_index.shape[1], 1, device=stepdata.device))
 
     # Final safety net
     if torch.isnan(out).any():
-        print("⚠️ NaNs in ob_propagation output — zeroing")
+        print("WARNING: NaNs in ob_propagation output — zeroing")
         out = torch.nan_to_num(out, nan=0.0)
 
     return out, attn
-    
+
 class Raindrop(pl.LightningModule):
     ""
     """Implement the raindrop stratey one by one."""
@@ -113,9 +113,9 @@ class Raindrop(pl.LightningModule):
         nhead = number of heads in multihead-attention
         nhid = dimension of feedforward network model
         dropout = dropout rate (default 0.1)
-        max_len = maximum sequence length 
+        max_len = maximum sequence length
         MAX  = positional encoder MAX parameter
-        n_classes = number of classes 
+        n_classes = number of classes
     """
 
     def __init__(self, d_inp=30, d_model=60, nhead=2, nhid=128, nlayers=2, dropout=0.3, max_len=215, d_static=9, n_classes=1, lr=1e-3, weight_decay=1e-5,
@@ -247,7 +247,7 @@ class Raindrop(pl.LightningModule):
     #     """
     #     Calculate weighted C-index stratified by infusion number.
     #     Only includes infusions where C-index can be computed.
-        
+
     #     Returns:
     #         dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
     #                     auroc metrics, and optionally binary_loss (as tensor for backprop)
@@ -256,10 +256,10 @@ class Raindrop(pl.LightningModule):
     #     num_infusion_tensor = torch.as_tensor(num_infusion, device=y_pred.device)
     #     y_event_tensor = torch.as_tensor(y_event, device=y_pred.device)
     #     time_to_event_tensor = torch.as_tensor(time_to_event, device=y_pred.device)
-        
+
     #     unique_infusions = torch.unique(num_infusion_tensor)
     #     risk_scores = y_pred.squeeze()
-        
+
     #     # ========================================================================
     #     # Part 1: Risk prediction metrics (C-index)
     #     # ========================================================================
@@ -269,10 +269,10 @@ class Raindrop(pl.LightningModule):
     #         for infusion in unique_infusions:
     #             mask = num_infusion_tensor == infusion
     #             current_events = y_event_tensor[mask]
-                
+
     #             if current_events.sum() > 0 and current_events.sum() < len(current_events):
     #                 valid_infusions.append(infusion)
-            
+
     #         # Calculate raw C-index (no stratification)
     #         try:
     #             c_idx_raw = self.c_index(
@@ -282,7 +282,7 @@ class Raindrop(pl.LightningModule):
     #             ).item()
     #         except:
     #             c_idx_raw = 0.5
-            
+
     #         # Initialize with defaults
     #         c_index_weighted = 0.5
     #         overall_c_index = 0.5
@@ -321,7 +321,7 @@ class Raindrop(pl.LightningModule):
     #                         })
     #                 except Exception as e:
     #                     continue
-            
+
     #         if len(computable_results) > 0:
     #             # Calculate weighted C-index
     #             total_samples = sum(r['num_samples'] for r in computable_results)
@@ -329,12 +329,12 @@ class Raindrop(pl.LightningModule):
     #                 r['c_index'] * r['num_samples'] / total_samples
     #                 for r in computable_results
     #             )
-                
+
     #             # Calculate overall C-index
     #             all_mask = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
     #             for r in computable_results:
     #                 all_mask |= r['mask']
-                
+
     #             try:
     #                 overall_c_index = self.c_index(
     #                     risk_scores[all_mask].unsqueeze(1),
@@ -343,9 +343,9 @@ class Raindrop(pl.LightningModule):
     #                 ).item()
     #             except:
     #                 overall_c_index = 0.5
-                
+
     #             num_groups = len(computable_results)
-            
+
     #         output_dict.update({
     #             'c_index_raw': c_idx_raw,
     #             'c_index_weighted': c_index_weighted,
@@ -354,11 +354,11 @@ class Raindrop(pl.LightningModule):
     #             'num_samples': total_samples,
     #             'per_infusion': computable_results,
     #         })
-        
+
     #     # ========================================================================
     #     # Part 2: Next-infusion side effect prediction (AUROC)
     #     # ========================================================================
-        
+
     #     # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
     #     ### flattened tensors
     #     time_to_event_tensor = time_to_event_tensor.flatten()
@@ -373,15 +373,15 @@ class Raindrop(pl.LightningModule):
     #     for infusion in unique_infusions:
     #         mask = num_infusion_tensor == infusion
     #         current_next_events = next_infusion_event[mask]
-            
+
     #         # Valid if has both positives and negatives
     #         has_positives = current_next_events.sum() > 0
     #         has_negatives = current_next_events.sum() < len(current_next_events)
-            
+
     #         if has_positives and has_negatives:
     #             valid_infusions_auroc.append(infusion)
     #     # print("valid_infusions_auroc 2", valid_infusions_auroc, "defined 2")
-        
+
     #     # Initialize defaults
     #     auroc_next_weighted = 0.5
     #     auroc_next_overall = 0.5
@@ -392,11 +392,11 @@ class Raindrop(pl.LightningModule):
     #     num_groups_auroc = 0
     #     num_samples_auroc = 0
     #     binary_loss_weighted = None  # Will be tensor if binary mode
-        
+
     #     if len(valid_infusions_auroc) > 0:
     #         # Second pass: compute AUROC for valid infusions
     #         computable_auroc_results = []
-            
+
     #         # TODO: testing - calculate binary loss across all samples for vectorized comparison
     #         all_sample_losses = self.loss_fn(
     #             risk_scores.unsqueeze(-1),
@@ -417,7 +417,7 @@ class Raindrop(pl.LightningModule):
     #                     precision = self.precision(current_risk, current_next_events.int())
     #                     recall = self.recall(current_risk, current_next_events.int())
     #                     auprc = self.auprc(current_risk, current_next_events.int())
-                        
+
     #                     current_res = {
     #                         'infusion': infusion.item(),
     #                         'auroc': auroc.item(),
@@ -429,7 +429,7 @@ class Raindrop(pl.LightningModule):
     #                         'num_positives': current_next_events.sum().item(),
     #                         'mask': mask
     #                     }
-                        
+
     #                 # Calculate binary loss (keep as tensor for backprop!)
     #                 if 'risk' not in self.option:
     #                     # binary_loss = self.loss_fn(
@@ -440,13 +440,13 @@ class Raindrop(pl.LightningModule):
     #                     # print("infusion", infusion.item(), "binary_loss", binary_loss)
     #                     current_res['binary_loss'] = binary_loss  # Keep as tensor
     #                     # current_res['binary_loss_value'] = binary_loss.item()  # For logging
-                    
+
     #                 computable_auroc_results.append(current_res)
-                    
+
     #             except Exception as e:
     #                 print(f"Skipping AUROC for infusion {infusion.item()}: {e}")
     #                 continue
-            
+
     #         if len(computable_auroc_results) > 0:
     #             # Calculate weighted metrics
     #             total_samples_auroc = sum(r['num_samples'] for r in computable_auroc_results)
@@ -484,7 +484,7 @@ class Raindrop(pl.LightningModule):
     #                     'per_infusion_auroc': computable_auroc_results
     #                 })
     #                 # print("accuracy_next_weighted:", accuracy_next_weighted, "precision_next_weighted:", precision_next_weighted, "recall_next_weighted:", recall_next_weighted)
-                
+
     #             # Calculate weighted binary loss (keep as tensor!)
     #             if 'risk' not in self.option:
     #                 # binary_loss_weighted = sum(
@@ -500,7 +500,7 @@ class Raindrop(pl.LightningModule):
     #                 all_mask_auroc = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
     #                 for r in computable_auroc_results:
     #                     all_mask_auroc |= r['mask']
-                    
+
     #                 try:
     #                     auroc_next_overall = self.auroc(
     #                         risk_scores[all_mask_auroc],
@@ -509,18 +509,18 @@ class Raindrop(pl.LightningModule):
     #                 except:
     #                     auroc_next_overall = 0.5
     #                 output_dict['auroc_next_infusion_overall'] = auroc_next_overall
-                    
+
     #                 num_groups_auroc = len(computable_auroc_results)
     #                 num_samples_auroc = total_samples_auroc
 
     #     else:
     #         return None # to be skipped in trainer loop so that no backprop is done
-        
+
     #     # Add binary loss as tensor (for backprop) if in binary mode
     #     if 'risk' not in self.option and binary_loss_weighted is not None:
     #         output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
     #         output_dict['num_samples_next_infusion'] = num_samples_auroc
-        
+
     #     return output_dict
 
     def _calculate_weighted_c_index_by_infusion(self, y_pred, y_event, time_to_event, num_infusion, mode='train'):
@@ -818,9 +818,9 @@ class Raindrop(pl.LightningModule):
             x = torch.cat([src, missing_mask], dim=-1)
         else:
             x = src
-        
+
         mask = torch.arange(maxlen).unsqueeze(0).expand(batch_size, -1).cuda() >= lengths.unsqueeze(1)
-        
+
 
         step2 = True  # If skip step 2, direct process the input data
         if step2 == False:
@@ -960,7 +960,7 @@ class Raindrop(pl.LightningModule):
         # fill nans with -10s
         xs = torch.nan_to_num(xs, nan=-10)
         return xs
-        
+
     def training_step(self, batch, batch_idx):
         # print("prior to training data loading")
         # (demo, times, values, measurements, lengths), pad_lens, ys = batch
@@ -1064,7 +1064,7 @@ class Raindrop(pl.LightningModule):
                     self.log(f'val_infusion_num_samples_{infusion_id}', res['num_samples'], prog_bar=False)
             self.log('val_auroc_nextinf_weighted', weighted_auroc, prog_bar=True)
             self.log('val_auroc_nextinf_overall', overall_auroc, prog_bar=True)
-            
+
         return loss
 
     def test_step(self, batch, batch_idx):
@@ -1139,5 +1139,5 @@ class Raindrop(pl.LightningModule):
 
             self.log('test_auroc_nextinf_weighted', weighted_auroc, prog_bar=True)
             self.log('test_auroc_nextinf_overall', overall_auroc, prog_bar=True)
-                
+
         return loss

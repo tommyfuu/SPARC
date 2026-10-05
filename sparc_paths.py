@@ -27,12 +27,8 @@ RESULTS_ROOT = os.environ.get(
     'SPARC_RESULTS_PATH',
     '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models')
 
-# published (batch_first=False) SPARC / SPARC-P checkpoints; benchmarks are in RESULTS_ROOT
-SPARC_PUBLISHED_MODEL_ROOT = os.environ.get(
-    'SPARC_PUBLISHED_MODEL_PATH', RESULTS_ROOT + '_060726')
 BENCHMARK_MODEL_ROOT = os.environ.get('SPARC_BENCHMARK_MODEL_PATH', RESULTS_ROOT)
-# batch_first=True MSK-CAIA models (default). For the published bf=False results set
-# SPARC_060726_MODEL_PATH to SPARC_PUBLISHED_MODEL_ROOT and pass -bf False.
+# batch_first=True MSK-CAIA SPARC / SPARC-P models
 SPARC_BF_MODEL_ROOT = os.environ.get(
     'SPARC_BF_MODEL_PATH', '/data1/morrisq/fuc/SPARC_CAIA_092426')
 SPARC_MODEL_ROOT = os.environ.get('SPARC_060726_MODEL_PATH', SPARC_BF_MODEL_ROOT)
@@ -46,10 +42,6 @@ SPARC_TITRATION_RESULTS_DIR = os.environ.get(
     'SPARC_TITRATION_RESULTS_DIR',
     os.path.join(SPARC_RESULTS_VIS_ROOT, 'results_trainsize_bfTrue'))
 
-# side-effect models trained with -wbce False: the 'vanilla' arm of design choice 1
-SPARC_MODEL_ROOT_VANILLA = os.environ.get(
-    'SPARC_MODEL_ROOT_VANILLA',
-    os.path.join(os.path.dirname(SPARC_PUBLISHED_MODEL_ROOT), 'SPARC_fixed_models_092126'))
 
 # derived locations, each overridable
 COHORT_SUMMARIES_DIR = os.environ.get(

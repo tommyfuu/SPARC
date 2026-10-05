@@ -5,7 +5,6 @@ import torch.optim as optim
 import pytorch_lightning as pl
 from torchmetrics.classification import AUROC, Accuracy, Precision, Recall, F1Score, AveragePrecision
 import numpy as np
-# from MSK_featurename_list import *
 from MSK_featurename_list import *
 from torchsurv.loss import cox
 from torchsurv.metrics.cindex import ConcordanceIndex
@@ -39,7 +38,7 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         encoding[:, 0::2] = torch.sin(position * div_term)
         encoding[:, 1::2] = torch.cos(position * div_term)
-        encoding = encoding.unsqueeze(0)  # Add batch dimension
+        encoding = encoding.unsqueeze(0)  # (1, max_len, d_model)
         self.register_buffer('encoding', encoding)
 
     def forward(self, x):
@@ -48,22 +47,14 @@ class PositionalEncoding(nn.Module):
 
 
 class ContinuousTimeEncoding(nn.Module):
-    """
-    Learned Fourier-feature encoding of *actual* time values (e.g. days since
-    treatment start), as opposed to integer visit-index positional encoding.
-
-    Two visits a few days apart get similar embeddings; visits far apart get
-    very different ones. Works with irregular spacing and variable #visits.
-    The embedding is ADDED to each visit token (BERT-style), and the raw time
-    scalar is also kept as an input feature (handled elsewhere).
-    """
+    """Learned sin/cos embedding of elapsed time, added to each visit token."""
     def __init__(self, d_model, n_freqs=None, learnable=True):
         super(ContinuousTimeEncoding, self).__init__()
         if n_freqs is None:
             n_freqs = d_model // 2
         self.n_freqs = n_freqs
         self.d_model = d_model
-        # Initialize frequencies on a log scale (like sinusoidal PE) but learnable
+        # log-spaced init like sinusoidal PE, but learnable
         init_freq = torch.exp(
             torch.arange(0, n_freqs, dtype=torch.float) * (-math.log(10000.0) / max(n_freqs, 1))
         )
@@ -73,16 +64,10 @@ class ContinuousTimeEncoding(nn.Module):
         else:
             self.register_buffer('freq', init_freq)
             self.register_buffer('phase', torch.zeros(n_freqs))
-        # Project the 2*n_freqs sin/cos features to d_model if needed
         self.proj = nn.Linear(2 * n_freqs, d_model)
 
     def forward(self, t):
-        """
-        Args:
-            t: (batch, seq_len) tensor of time values (NaNs should be pre-filled)
-        Returns:
-            (batch, seq_len, d_model) time embedding
-        """
+        """t: (B, T) times, NaNs already filled -> (B, T, d_model)."""
         t = torch.nan_to_num(t, nan=0.0).unsqueeze(-1)          # (B, T, 1)
         angles = t * self.freq + self.phase                      # (B, T, n_freqs)
         feats = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B,T,2F)
@@ -90,34 +75,22 @@ class ContinuousTimeEncoding(nn.Module):
 
 
 class PerModuleTokenizer(nn.Module):
-    """
-    Tokenizes each visit into one token per clinical module (erythroid, myeloid,
-    renal, hepatic, vitals, ...) plus tokens for static features and time, then
-    sums them into a single d_model visit token (or returns per-module tokens).
-
-    Crucially, missingness is used to GATE each module projection: a module whose
-    constituent labs are all missing contributes ~0 to the visit token, rather
-    than a learned "missing" sentinel that competes with real signal. This is the
-    quality-gate idea applied at the input.
-
-    Expects the assembled base feature layout (per timestep), WITHOUT the
-    missingness-doubling / padding columns:
-        [ dynamic_feats (labs[+vitals]) | static_feats | time ]
-    and a matching missingness mask of the same width (1=observed, 0=missing).
-    """
+    """Embeds each clinical module separately (gated by its observed fraction) and sums
+    them with the static and time embeddings into one token per visit."""
     def __init__(self, module_index_cfg, d_model, dropout=0.1,
-                 use_time_encoding=True, n_static=0):
+                 use_time_encoding=True, n_static=0, time_as_raw_feature=False):
         super(PerModuleTokenizer, self).__init__()
         self.d_model = d_model
         self.modules_cfg = module_index_cfg['modules']  # list of (name, [idx])
         self.static_start = module_index_cfg.get('static_start', None)
         self.n_static = n_static
         self.use_time_encoding = use_time_encoding
+        # optional linear embedding of the raw elapsed time
+        self.time_as_raw_feature = time_as_raw_feature
 
-        # One small projection per module: (n_feat_in_module * 2) -> d_model
-        # (*2 because we feed [values | missingness] for that module's columns)
+        # per-module projection over [values | missingness] -> d_model
         self.module_names = []
-        self.module_indices = []          # python lists; registered as buffers below
+        self.module_indices = []          # also registered as buffers below
         self.module_projections = nn.ModuleDict()
         for i, (name, idxs) in enumerate(self.modules_cfg):
             self.module_names.append(name)
@@ -130,7 +103,7 @@ class PerModuleTokenizer(nn.Module):
                 nn.Dropout(dropout),
             )
 
-        # Static features (gender, age, ctype one-hot, ...) -> one token
+        # static features (gender, age, ctype one-hot, ...) -> one token
         if n_static > 0:
             self.static_projection = nn.Sequential(
                 nn.Linear(n_static * 2, d_model),
@@ -141,25 +114,18 @@ class PerModuleTokenizer(nn.Module):
         else:
             self.static_projection = None
 
-        # Continuous-time embedding
         if use_time_encoding:
             self.time_encoding = ContinuousTimeEncoding(d_model)
         else:
             self.time_encoding = None
+        self.raw_time_projection = nn.Linear(1, d_model) if time_as_raw_feature else None
 
-        # Learned per-module type embedding (so the encoder knows which axis a
-        # token came from), added to each module token.
+        # module-type embedding so the encoder knows which module a token came from
         self.module_type_embedding = nn.Embedding(len(self.modules_cfg) + 1, d_model)
 
     def forward(self, values, missingness, times):
-        """
-        Args:
-            values:      (B, T, n_base)  feature values, NaNs pre-filled with 0
-            missingness: (B, T, n_base)  1=observed, 0=missing (same width)
-            times:       (B, T)          time values for continuous-time encoding
-        Returns:
-            visit_tokens: (B, T, d_model) summed module/static/time token
-        """
+        """values, missingness: (B, T, n_base), NaNs filled with 0, 1=observed;
+        times: (B, T). Returns (B, T, d_model)."""
         B, T, _ = values.shape
         token = torch.zeros(B, T, self.d_model, device=values.device, dtype=values.dtype)
 
@@ -169,10 +135,9 @@ class PerModuleTokenizer(nn.Module):
             m = missingness.index_select(-1, idx)    # (B, T, n_mod)
             mod_in = torch.cat([v, m], dim=-1)        # (B, T, 2*n_mod)
             mod_tok = self.module_projections[name](mod_in)   # (B, T, d_model)
-            # Quality gate: fraction of this module's features observed at this visit
+            # gate = fraction of this module's features observed at this visit
             gate = m.mean(dim=-1, keepdim=True)               # (B, T, 1) in [0,1]
             mod_tok = mod_tok * gate
-            # Add module-type embedding
             type_emb = self.module_type_embedding(
                 torch.tensor(i, device=values.device)
             )
@@ -189,58 +154,27 @@ class PerModuleTokenizer(nn.Module):
 
         if self.time_encoding is not None:
             token = token + self.time_encoding(times)
+        if self.raw_time_projection is not None:
+            t = torch.nan_to_num(times, nan=0.0).unsqueeze(-1)   # (B, T, 1)
+            token = token + self.raw_time_projection(t)
 
         return token
 
 
-# class TemporalAttentionAggregation(nn.Module):
-#     """Attention-based aggregation over the temporal dimension."""
-#     def __init__(self, d_model):
-#         super(TemporalAttentionAggregation, self).__init__()
-#         # Linear layer to compute attention scores
-#         self.attention = nn.Linear(d_model, 1)
-
-#     def forward(self, z, mask):
-#         """
-#         Args:
-#             z: (batch_size, max_time_len, d_model) - transformer output
-#             mask: (batch_size, max_time_len) - True for padded, False for valid
-#         Returns:
-#             z_attended: (batch_size, d_model) - attention-weighted aggregation
-#         """
-#         # Compute attention scores: (batch_size, max_time_len, 1)
-#         attn_scores = self.attention(z)
-
-#         # Mask padded positions with -inf before softmax
-#         attn_scores = attn_scores.masked_fill(mask.unsqueeze(-1), float('-inf'))
-
-#         # Apply softmax to get attention weights: (batch_size, max_time_len, 1)
-#         attn_weights = F.softmax(attn_scores, dim=1)
-
-#         # Weighted sum over time: (batch_size, d_model)
-#         z_attended = (z * attn_weights).sum(dim=1)
-
-#         return z_attended
-
 
 class MissingnessAwareAttentionAggregation(nn.Module):
-    """
-    Attention-based temporal aggregation that explicitly models data quality
-    and missingness patterns. Downweights attention from timesteps with heavy
-    missingness and combines attended features with uncertainty-aware statistics.
-    """
+    """Gated attention pooling over time, combined with the masked mean and std."""
     def __init__(self, d_model, reduction_ratio=4, max_time_len=20):
         super(MissingnessAwareAttentionAggregation, self).__init__()
 
-        # Attention scoring network - deeper for better temporal pattern learning
-        # Add LayerNorm for long sequences (>20 timepoints) to prevent numerical instability
+        # LayerNorm on the scores for sequences longer than 20
         if max_time_len > 20:
             self.attention_scorer = nn.Sequential(
                 nn.Linear(d_model, d_model // reduction_ratio),
                 nn.Tanh(),
                 nn.Dropout(0.1),
                 nn.Linear(d_model // reduction_ratio, 1),
-                nn.LayerNorm(1)  # Stabilize attention scores for long sequences
+                nn.LayerNorm(1)
             )
         else:
             self.attention_scorer = nn.Sequential(
@@ -250,126 +184,56 @@ class MissingnessAwareAttentionAggregation(nn.Module):
                 nn.Linear(d_model // reduction_ratio, 1)
             )
 
-        # Quality gate network - learns to assess representation reliability
-        # This will output a quality score per timestep based on the representation
+        # per-timestep reliability score in [0, 1]
         self.quality_gate = nn.Sequential(
             nn.Linear(d_model, d_model // reduction_ratio),
             nn.ReLU(),
             nn.Linear(d_model // reduction_ratio, 1),
-            nn.Sigmoid()  # Output in [0, 1] range
+            nn.Sigmoid()
         )
 
-        # Combine attended representation with statistical features
-        # attended + mean + std (3 representations total)
+        # [attended | mean | std] -> d_model
         self.output_projection = nn.Sequential(
             nn.Linear(d_model * 3, d_model),
             nn.LayerNorm(d_model)
         )
 
     def forward(self, z, mask):
-        """
-        Args:
-            z: (batch_size, max_time_len, d_model) - transformer output
-            mask: (batch_size, max_time_len) - True for padded, False for valid
-        Returns:
-            z_aggregated: (batch_size, d_model) - missingness-aware aggregated representation
-        """
+        """z: (B, T, d_model); mask: (B, T), True = padded. Returns (B, d_model)."""
         batch_size, seq_len, d_model = z.shape
 
-        # Compute base attention scores: (batch_size, max_time_len, 1)
         attn_scores = self.attention_scorer(z)
 
-        # Compute quality gates (representation reliability): (batch_size, max_time_len, 1)
         quality_scores = self.quality_gate(z)
 
-        # Modulate attention by quality - timesteps with poor quality get lower attention
-        # This implements the "trust complete data more" principle
+        # down-weight low-quality timesteps
         modulated_scores = attn_scores * quality_scores
 
-        # Mask padded positions with -inf before softmax
         mask_expanded = mask.unsqueeze(-1)  # (batch_size, max_time_len, 1)
         modulated_scores = modulated_scores.masked_fill(mask_expanded, float('-inf'))
 
-        # Apply softmax to get final attention weights: (batch_size, max_time_len, 1)
         attn_weights = F.softmax(modulated_scores, dim=1)
 
-        # Quality-aware weighted sum over time: (batch_size, d_model)
         z_attended = (z * attn_weights).sum(dim=1)
 
-        # Compute uncertainty-aware statistics
-        # Mask out padded positions for statistical computation
+        # masked mean / std over valid steps
         z_masked = z.masked_fill(mask_expanded.expand_as(z), 0)
         valid_counts = (~mask).sum(dim=1, keepdim=True).clamp(min=1)  # (batch_size, 1)
 
-        # Mean over valid positions
         z_mean = z_masked.sum(dim=1) / valid_counts  # (batch_size, d_model)
 
-        # Standard deviation over valid positions (measures temporal variability)
         z_centered = z - z_mean.unsqueeze(1)
         z_centered_masked = z_centered.masked_fill(mask_expanded.expand_as(z), 0)
         z_var = (z_centered_masked ** 2).sum(dim=1) / valid_counts
         z_std = torch.sqrt(z_var + 1e-8)  # (batch_size, d_model)
 
-        # Combine: attended (quality-weighted) + mean (central tendency) + std (variability)
         z_combined = torch.cat([z_attended, z_mean, z_std], dim=-1)  # (batch_size, 3*d_model)
 
-        # Project back to d_model with normalization
         z_aggregated = self.output_projection(z_combined)  # (batch_size, d_model)
 
         return z_aggregated
 
 
-class MLPTemporalAggregation(nn.Module):
-    """
-    MLP-based temporal aggregation for DuETT.
-    Combines mean and max pooling, then applies an MLP to learn
-    a flexible aggregation function.
-    """
-    def __init__(self, d_model, hidden_dim=None, dropout=0.1):
-        super(MLPTemporalAggregation, self).__init__()
-
-        if hidden_dim is None:
-            hidden_dim = d_model
-
-        # MLP to process pooled features
-        # Input: concatenated mean and max pooling (2 * d_model)
-        # Output: d_model
-        self.aggregation_mlp = nn.Sequential(
-            nn.Linear(2 * d_model, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, d_model),
-            nn.LayerNorm(d_model)
-        )
-
-    def forward(self, z, mask):
-        """
-        Args:
-            z: (batch_size, max_time_len, d_model) - transformer output
-            mask: (batch_size, max_time_len) - True for padded, False for valid
-        Returns:
-            z_aggregated: (batch_size, d_model) - MLP-aggregated representation
-        """
-        batch_size, seq_len, d_model = z.shape
-        mask_expanded = mask.unsqueeze(-1)  # (batch_size, max_time_len, 1)
-
-        # Mean pooling over valid positions
-        z_masked = z.masked_fill(mask_expanded.expand_as(z), 0)
-        valid_counts = (~mask).sum(dim=1, keepdim=True).clamp(min=1)  # (batch_size, 1)
-        z_mean = z_masked.sum(dim=1) / valid_counts  # (batch_size, d_model)
-
-        # Max pooling over valid positions
-        z_max = z.masked_fill(mask_expanded.expand_as(z), float('-inf'))
-        z_max, _ = z_max.max(dim=1)  # (batch_size, d_model)
-
-        # Concatenate pooled features
-        z_pooled = torch.cat([z_mean, z_max], dim=-1)  # (batch_size, 2*d_model)
-
-        # Apply MLP to learn aggregation
-        z_aggregated = self.aggregation_mlp(z_pooled)  # (batch_size, d_model)
-
-        return z_aggregated
 
 
 def nanstd(x):
@@ -379,7 +243,7 @@ def symmetrical_loss_calc(preds, gt, loss_fn, option = 'pairwise_logistic'):
     pos = preds[gt == 1]
     neg = preds[gt == 0]
 
-    # pairwise differences z_ij = s_pos_i - s_neg_j
+    # pairwise differences z_ij = s_pos_i - s_neg_j, shape (P, Q)
     z = pos.unsqueeze(1) - neg.unsqueeze(0)   # shape (P, Q)
 
     if option == 'pairwise_barrier':
@@ -404,7 +268,7 @@ class SPARC(pl.LightningModule):
                 # time encoding
                  time_encoding = 'explicit',
                 # temporal aggregation
-                 temporal_aggregation='minmaxmean',  # Options: 'minmaxmean', 'attention', 'mlp', or 'cls' (rep_token style - appended at end)
+                 temporal_aggregation='attention',  # only 'attention' is supported
                 # relevant for shapley - avoid using sigmoid
                  use_sigmoid=True, side_effects_num_infusion=False, loss_option = 'default', test_metrics_by_infusion_group=True,
                 # relevant for GCSF prediction/analysis
@@ -415,16 +279,16 @@ class SPARC(pl.LightningModule):
                  module_index_cfg=None,        # dict from build_module_index_config, or None to disable
                  use_module_tokenizer=False,   # master switch for per-module input embedding
                  use_continuous_time=True,     # add learned continuous-time embedding
+                 time_as_raw_feature=False,    # add a linear map of the raw elapsed-time scalar
                  n_static_features=0,          # # of trailing static scalars (gender/age/ctype...)
                  post_mlp_dropout=None,         # dropout for post-transformer MLP; defaults to `dropout`
+                 batch_first=True,             # attend over time; must match how the checkpoint was trained
                 # pretraining objective variants
                  binary_pos_weight=None,
                  side_effects_pos_weight=None,
                  ):
         super(SPARC, self).__init__()
 
-        ## task/data-specific
-        # check to make sure option is in ['pretrain', 'binary', 'risk']
         if option not in ['pretrain', 'binary', 'risk', 'side_effects', 'side_effects_risk', 'side_effects_next_risk']:
             raise ValueError('option has to be "pretrain" or "binary" or "risk" or "side_effects" or "side_effects_risk" or "side_effects_next_risk"')
         self.option = option
@@ -441,12 +305,10 @@ class SPARC(pl.LightningModule):
         self.include_steroid = include_steroid
         self.use_steroid = use_steroid
 
-        # check if there are keys of modular_featuredim_dict that are not in the list of allowed features
         if [el for el in modular_featuredim_dict.keys() if el not in MSK_numfeature_dict.keys()]:
             raise ValueError('There are keys of modular_featuredim_dict that are not in the list of allowed features')
-        # Account for missingness indicators and padding: 2 * (base_features + time) + padding_indicator
         base_features = sum(modular_featuredim_dict.values())
-        self.base_features = base_features  # Store for later use in pretrain prediction
+        self.base_features = base_features
         print(f"\n{'='*80}")
         print(f"SPARC MODEL INPUT FEATURE DIMENSIONS")
         print(f"{'='*80}")
@@ -459,23 +321,21 @@ class SPARC(pl.LightningModule):
         if 'vitals' in modular_featuredim_dict.keys() or 'extra_lab' in modular_featuredim_dict.keys() or 'basic_lab' in modular_featuredim_dict.keys():
             if advanced_model == 'default':
                 if missing_mask:
-                    # base_features + 1 (time), then double for missingness, then +1 for padding
+                    # (features + time) x 2 for missingness, + padding
                     self.total_feature_dim = 2 * (base_features + 1) + 1
                 else:
-                    # base_features + 1 (time) + 1 (padding indicator), no missingness doubling
+                    # features + time + padding
                     self.total_feature_dim = (base_features + 1) + 1
             elif advanced_model == 'duett':
                 ts_features = sum([el for k, el in modular_featuredim_dict.items() if k in ['basic_vitals', 'extra_vitals', 'extra_lab', 'basic_lab', 'cbc_differential']])
                 non_ts_features = sum([el for k, el in modular_featuredim_dict.items() if k not in ['basic_vitals', 'extra_vitals', 'extra_lab', 'basic_lab', 'cbc_differential']])
                 if missing_mask:
-                    # DuETT: 2*ts + non_ts, then +1 time, then double for missingness, then +1 padding
                     self.total_feature_dim = 2 * (2 * ts_features + non_ts_features + 1) + 1
                 else:
                     self.total_feature_dim = (2 * ts_features + non_ts_features + 1) + 1
         else:
             if advanced_model == 'default':
                 if missing_mask:
-                    # No time column for non lab/vitals features, just double for missingness
                     self.total_feature_dim = 2 * base_features
                 else:
                     self.total_feature_dim = base_features
@@ -508,10 +368,11 @@ class SPARC(pl.LightningModule):
         self.side_effects_num_infusion = side_effects_num_infusion
         self.missing_mask = missing_mask
 
-        # Per-module tokenizer config
         self.module_index_cfg = module_index_cfg
         self.use_module_tokenizer = use_module_tokenizer and (module_index_cfg is not None)
         self.use_continuous_time = use_continuous_time
+        self.time_as_raw_feature = time_as_raw_feature
+        self.batch_first = batch_first
         self.n_static_features = n_static_features
         self.post_mlp_dropout = post_mlp_dropout if post_mlp_dropout is not None else dropout
 
@@ -521,28 +382,27 @@ class SPARC(pl.LightningModule):
                 "Use advanced_model='default'.")
 
 
-        # Override side_effects_num_infusion for binary tasks (only relevant for side-effect tasks)
+        # num_infusion only applies to side-effect tasks
         if option in ['binary', 'risk'] and self.side_effects_num_infusion:
             print(f"WARNING: side_effects_num_infusion=True is not applicable for option '{option}'. Setting to False.")
             self.side_effects_num_infusion = False
 
-        # Auto-select temporal_aggregation for DuETT
-        if advanced_model == 'duett' and temporal_aggregation != 'cls':
-            print(f"Using DuETT model. Automatically setting temporal_aggregation to be 'cls' (rep_token style).")
-            temporal_aggregation = 'cls'
+        # only attention aggregation with the missingness mask is supported
+        if temporal_aggregation != 'attention':
+            raise ValueError(
+                f"temporal_aggregation must be 'attention', got {temporal_aggregation!r}")
+        if not missing_mask:
+            raise ValueError("missing_mask must be True; the no-mask variant was removed")
         self.temporal_aggregation = temporal_aggregation
         ## pretrain stuff
         self.pretrain_contrastive_weight = pretrain_contrastive_weight
         self.finetune_part = finetune_part
         self.time_calibration = time_calibration
 
-        #############################
 
-        # model modules
         if self.total_feature_dim == 1:
             raise ValueError('no input features provided')
         else:
-            # time processing
             self.time_encoding = time_encoding
             if time_encoding == 'pe':
                 self.positional_encoding = PositionalEncoding(d_model=d_model, max_len=max_time_len)
@@ -553,7 +413,6 @@ class SPARC(pl.LightningModule):
                     nn.Linear(int(np.sqrt((self.total_feature_dim+1))), 1),
                 )
 
-            # input projection
             self.input_projection = nn.Sequential(
                 nn.Linear(self.total_feature_dim, d_model),
                 nn.ReLU(),
@@ -561,15 +420,14 @@ class SPARC(pl.LightningModule):
                 nn.ReLU(),
             )
 
-            # Per-module tokenizer (optional). When enabled it REPLACES the flat
-            # input_projection path with one token per clinical module + static +
-            # continuous time, with missingness used to gate each module.
+            # per-module tokenizer replaces the flat input_projection path
             if self.use_module_tokenizer:
                 self.per_module_tokenizer = PerModuleTokenizer(
                     self.module_index_cfg, d_model,
                     dropout=dropout,
                     use_time_encoding=self.use_continuous_time,
                     n_static=self.n_static_features,
+                    time_as_raw_feature=self.time_as_raw_feature,
                 )
                 print(f"Per-module tokenizer ENABLED: "
                       f"{[n for n, _ in self.module_index_cfg['modules']]}, "
@@ -577,8 +435,7 @@ class SPARC(pl.LightningModule):
                       f"n_static={self.n_static_features}")
             else:
                 self.per_module_tokenizer = None
-                # Standalone continuous-time encoding for the flat path (added on
-                # top of the projected token) if requested.
+                # optional continuous-time embedding on the flat path
                 if self.use_continuous_time:
                     self.flat_time_encoding = ContinuousTimeEncoding(d_model)
                 else:
@@ -586,36 +443,19 @@ class SPARC(pl.LightningModule):
             # transformer encoder
             if advanced_model == 'duett':
                 num_encoder_layers = num_encoder_layers//2
-            self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, norm_first=True)
+            self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, norm_first=True, batch_first=self.batch_first)
             self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_encoder_layers)
             self.transformer_layer_norm = nn.LayerNorm(d_model)
 
             if advanced_model == 'duett':
-                # Adjust event transformer d_model to account for rep token if using cls aggregation
-                event_d_model = max_time_len + 1 if temporal_aggregation == 'cls' else max_time_len
-                ## since max_time_len is typically 20, nhead should be 3 to be a divisor of event_d_model for the event transformer (21)
-                self.event_encoder_layer = nn.TransformerEncoderLayer(d_model=event_d_model, nhead=3, dim_feedforward=dim_feedforward, dropout=dropout, norm_first=True)
+                event_d_model = max_time_len
+                # event transformer d_model = max_time_len, so nhead must divide it
+                self.event_encoder_layer = nn.TransformerEncoderLayer(d_model=event_d_model, nhead=3, dim_feedforward=dim_feedforward, dropout=dropout, norm_first=True, batch_first=self.batch_first)
                 self.event_transformer_encoder = nn.TransformerEncoder(self.event_encoder_layer, num_layers=num_encoder_layers)
 
-            # temporal aggregation module
-            if temporal_aggregation == 'attention':
-                self.temporal_attention = MissingnessAwareAttentionAggregation(d_model, max_time_len=max_time_len)
-                aggregation_output_dim = d_model
-            elif temporal_aggregation == 'minmaxmean':
-                aggregation_output_dim = 3 * d_model
-            elif temporal_aggregation == 'mlp':
-                self.temporal_mlp = MLPTemporalAggregation(d_model, hidden_dim=d_model, dropout=dropout)
-                aggregation_output_dim = d_model
-            elif temporal_aggregation == 'cls':
-                # CLS token: learnable token appended to sequence (similar to rep_token in DuETT)
-                # Use special embeddings module for initialization
-                self.special_embeddings = nn.Embedding(2, d_model)  # 2 embeddings: one for masked, one for representation
-                self.register_buffer("REPRESENTATION_EMBEDDING_KEY", torch.tensor(1))
-                aggregation_output_dim = d_model
-            else:
-                raise ValueError(f"temporal_aggregation must be 'minmaxmean', 'attention', 'mlp', or 'cls', got {temporal_aggregation}")
+            self.temporal_attention = MissingnessAwareAttentionAggregation(d_model, max_time_len=max_time_len)
+            aggregation_output_dim = d_model
 
-            # output projection
             self.post_transformer_to_representation_MLP = nn.Sequential(
                 nn.Linear(aggregation_output_dim, d_model),
                 nn.LayerNorm(d_model),
@@ -624,14 +464,12 @@ class SPARC(pl.LightningModule):
                 nn.Linear(d_model, d_model),
                 nn.LayerNorm(d_model),
             )
-            # last time point prediction (predicts only base features, not expanded with missingness indicators)
+            # last-timepoint prediction (base features only)
             self.representation_MLP_to_last = nn.Sequential(
                 nn.Linear(d_model+1, self.base_features),
             )
-            # representation to binary classification
             if self.total_feature_dim != 1:
                 self.representation_to_binary_MLP = nn.Linear(d_model, 1)
-                # if finetune_part: only representation_to_binary_MLP should have requires_grad=True
                 if option != 'pretrain' and finetune_part:
                     print("finetune_part, only representation_to_binary_MLP should have requires_grad=True")
                     for param in self.parameters():
@@ -639,14 +477,11 @@ class SPARC(pl.LightningModule):
                     for param in self.representation_to_binary_MLP.parameters():
                         param.requires_grad = True
 
-            # if med_as_feature is True, two MLPs
             if med_as_feature:
-                # MLP to map the representation to the medication features
                 self.meds_to_single_MLP = nn.Sequential(
                     nn.Linear(len(meds_l), 1),
                     nn.ReLU()
                 )
-                # MLP to combine the representation and the medication features
                 self.medandrepresentation_to_representation_MLP = nn.Sequential(
                     nn.Linear(d_model+1, d_model),
                     nn.ReLU()
@@ -670,13 +505,11 @@ class SPARC(pl.LightningModule):
                         nn.ReLU()
                     )
                     add_num += 1
-                # MLP to combine the representation and the num_infusion features
                 self.representation_and_infusionnum_to_representation_MLP = nn.Sequential(
                     nn.Linear(d_model+add_num, d_model),
                     nn.ReLU()
                 )
 
-        # loss functions
         if option not in ['pretrain', 'binary', 'risk', 'side_effects', 'side_effects_risk', 'side_effects_next_risk']:
             raise ValueError('Output projection error: option has to be "binary" or "pretrain" or "risk"')
         elif option in ['binary', 'side_effects', 'side_effects_risk', 'side_effects_next_risk']:
@@ -690,9 +523,7 @@ class SPARC(pl.LightningModule):
                     self.bce_loss_fn = nn.BCELoss()
                     print(f"Hybrid loss component: BCELoss()")
             else:
-                # -wbce False leaves side_effects_pos_weight None -> pos_weight 1.0,
-                # which is plain BCE. Checkpoints store no hyperparameters, so the
-                # flag is the only record of which loss a run used.
+                # pos_weight None = plain BCE
                 _se_pw = side_effects_pos_weight if side_effects_pos_weight is not None else 1.0
                 self.loss_fn = WeightedBCELoss(pos_weight=_se_pw, reduction='none')
                 if _se_pw == 1.0:
@@ -718,116 +549,69 @@ class SPARC(pl.LightningModule):
             raise ValueError('No data provided')
         if self.med_as_feature:
             src, meds_data = src
-        ### TS TRANSFORMER SECTION
         if self.total_feature_dim != 1:
             batch_size, seq_len, _ = src.size() ## src dim: (batch_size, max_time_len, d_features + 1)
             if self.advanced_model == 'duett':
-                # on the time dim, do the time_cve
                 cved_time = self.time_cve(src[:, :, -2].unsqueeze(-1)).squeeze(-1) # src dim: (batch_size, max_time_len, d_features + 1)
                 src = src.clone()
                 src[:, :, -2] = cved_time
-            # Project inputs to model dimension
             if self.per_module_tokenizer is not None:
-                # Deconstruct the assembled flat vector back into parts.
-                # Layout (missing_mask=True): [base(n_base) | time(1) | miss_base(n_base) | miss_time(1) | padding(1)]
-                # Layout (missing_mask=False): [base(n_base) | time(1) | padding(1)] (NaNs -> -10 sentinel)
+                # layout: [features | time | missingness | padding], or without missingness
+                # (NaNs as -10) when missing_mask=False
                 n_base = self.base_features
                 values = src[:, :, :n_base]
                 times = src[:, :, n_base]
                 if self.missing_mask:
                     missingness = src[:, :, n_base + 1: 2 * n_base + 1]
                 else:
-                    # Reconstruct missingness from the -10 sentinel used in data_prep
                     missingness = (values != -10.0).float()
                     values = torch.where(values == -10.0, torch.zeros_like(values), values)
                 src = self.per_module_tokenizer(values, missingness, times)  # (B, T, d_model)
             else:
-                # Capture raw time (column n_base) before projecting, for optional
-                # continuous-time embedding on the flat path.
                 if getattr(self, 'flat_time_encoding', None) is not None:
                     raw_times = src[:, :, self.base_features]
                 src = self.input_projection(src)  ## src dim (batch_size, max_time_len, d_model)
                 if getattr(self, 'flat_time_encoding', None) is not None:
                     src = src + self.flat_time_encoding(raw_times)
 
-            # If using CLS token, append it to the sequence (rep_token style)
-            if self.temporal_aggregation == 'cls':
-                batch_size = src.size(0)
-                # Get representation embedding token: (batch_size, 1, d_model)
-                rep_tokens = self.special_embeddings(self.REPRESENTATION_EMBEDDING_KEY).unsqueeze(0).expand(batch_size, -1, -1)
-                # Append rep token: (batch_size, max_time_len+1, d_model)
-                src = torch.cat([src, rep_tokens], dim=1)
-
-                # Update padding mask to include rep token (rep token is never masked)
-                if src_key_padding_mask is not None:
-                    # src_key_padding_mask is (max_time_len, batch_size)
-                    # Add False for rep token position (not masked)
-                    rep_mask = torch.zeros(1, batch_size, dtype=torch.bool, device=src_key_padding_mask.device)
-                    src_key_padding_mask = torch.cat([src_key_padding_mask, rep_mask], dim=0)
-                    # Now shape: (max_time_len+1, batch_size)
-
-            # add positional encoding
             if self.advanced_model == 'default' and self.time_encoding == 'pe':
                 src = self.positional_encoding(src) # by default this is not used because we have time as a feature
 
-            # src dim: (batch_size, max_time_len, d_model) or (batch_size, max_time_len+1, d_model) if CLS
+            # padding mask comes as (T, B); the batch_first encoder needs (B, T)
+            enc_mask = src_key_padding_mask
+            if self.batch_first and enc_mask is not None:
+                enc_mask = enc_mask.T
+
             if self.advanced_model == 'default':
-                z = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask) # z dim (batch_size, max_time_len, d_model)
-                # Small batches can cause LayerNorm instability - avoid
+                z = self.transformer_encoder(src, src_key_padding_mask=enc_mask) # z dim (batch_size, max_time_len, d_model)
                 if torch.isnan(z).any():
                     z = torch.nan_to_num(z, nan=0.0)
                 z = self.transformer_layer_norm(z)
 
-            # duett: + event transformer
             if self.advanced_model == 'duett':
                 for layer_i, (event_layer, time_layer) in enumerate(zip(self.event_transformer_encoder.layers, self.transformer_encoder.layers)):
-                    # Rep token flows through both transformers naturally (no separation needed)
                     # src shape: (batch_size, max_time_len, d_model) or (batch_size, max_time_len+1, d_model) if cls
                     src = src.permute(0, 2, 1) # src dim (batch_size, d_model, max_time_len) or (batch_size, d_model, max_time_len+1)
                     src = event_layer(src) # src dim (batch_size, d_model, max_time_len) or (batch_size, d_model, max_time_len+1)
                     src = src.permute(0, 2, 1) # src dim (batch_size, max_time_len, d_model) or (batch_size, max_time_len+1, d_model)
-                    src = time_layer(src, src_key_padding_mask=src_key_padding_mask) # src dim (batch_size, max_time_len, d_model) or (batch_size, max_time_len+1, d_model)
+                    src = time_layer(src, src_key_padding_mask=enc_mask) # src dim (batch_size, max_time_len, d_model) or (batch_size, max_time_len+1, d_model)
 
                 z = src
                 z = self.transformer_layer_norm(z)
 
-            # Temporal aggregation
-            if self.temporal_aggregation == 'cls':
-                # Extract rep token (last position) - no need for masking or pooling
-                # z shape: (batch_size, max_time_len+1, d_model)
-                z = z[:, -1, :]  # z dim: (batch_size, d_model)
+            if src_key_padding_mask is not None:
+                # (T, B) -> (B, T, 1)
+                mask = src_key_padding_mask.T.unsqueeze(-1).bool()
             else:
-                # For other aggregation methods, need to handle masking
-                if src_key_padding_mask is not None:
-                    # src_key_padding_mask is of shape (max_time_len, batch_size) or (max_time_len+1, batch_size) if CLS
-                    # We need to transpose it to (batch_size, max_time_len) and unsqueeze to (batch_size, max_time_len, 1)
-                    mask = src_key_padding_mask.T.unsqueeze(-1).bool()
-                else:
-                    # No padding mask provided - all positions are valid (False = valid, True = padded)
-                    mask = torch.zeros((batch_size, seq_len, 1), dtype=torch.bool, device=z.device)
+                # no mask: all positions valid (True = padded)
+                mask = torch.zeros((batch_size, seq_len, 1), dtype=torch.bool, device=z.device)
 
-                if self.temporal_aggregation == 'minmaxmean':
-                    z_max = z.masked_fill(mask, float('-inf'))  # Mask padded positions with -inf for max
-                    z_max_over_time, _ = torch.max(z_max, dim=1)  # Max along the `max_time_len` dimension
-                    z_min = z.masked_fill(mask, float('inf'))  # Mask padded positions with +inf for min
-                    z_min_over_time, _ = torch.min(z_min, dim=1)  # Min along the `max_time_len` dimension
+            z = self.temporal_attention(z, mask.squeeze(-1))  # z dim (batch_size, d_model)
 
-                    z_sum = z.masked_fill(mask, 0).sum(dim=1)  # Sum over `max_time_len`
-                    valid_counts = (~mask).sum(dim=1).clamp(min=1)  # Count VALID (non-padded) entries per batch
-                    z_mean_over_time = z_sum / valid_counts  # Element-wise division
-                    z = torch.cat([z_max_over_time, z_min_over_time, z_mean_over_time], dim=-1) # z dim (batch_size, 3*d_model)
-                elif self.temporal_aggregation == 'attention':
-                    z = self.temporal_attention(z, mask.squeeze(-1))  # z dim (batch_size, d_model)
-                elif self.temporal_aggregation == 'mlp':
-                    z = self.temporal_mlp(z, mask.squeeze(-1))  # z dim (batch_size, d_model)
-
-            # Pass through MLP to map to representation dimension
             z = self.post_transformer_to_representation_MLP(z)  # z dim: (batch_size, d_model)
 
-            # if med_as_feature is True, we need to process the medication features
             if self.med_as_feature:
                 meds_data_representation = self.meds_to_single_MLP(meds_data)  # meds_data_representation dim: (batch_size, 1)
-                # concatenate the representation with the medication features
                 z = torch.cat([z, meds_data_representation], dim=-1)  # z dim: (batch_size, d_model + 1)
                 z = self.medandrepresentation_to_representation_MLP(z)  # z dim: (batch_size, d_model)
 
@@ -844,19 +628,14 @@ class SPARC(pl.LightningModule):
 
 
         if self.option == 'pretrain' and self.usage == 'standalone':
-            # concatenate the last time point representation with the last time point time as input
-            z1 = self.representation_MLP_to_last(torch.cat([z, last_tp_times.unsqueeze(-1)], dim=-1)) # z for contrastive learning loss, z1 for last token prediction loss
-            # z1 dim (batch_size, total_feature_dim-1)
+            z1 = self.representation_MLP_to_last(torch.cat([z, last_tp_times.unsqueeze(-1)], dim=-1))  # z: representation, z1: predicted last timepoint
             return z, z1
         elif self.option == 'pretrain' and self.usage != 'standalone':
-            # just directly use as features (plugin)
             return z
 
-        # if the goal is binary classification after pretraining layers or risk prediction
         elif self.option in ['binary', 'risk', 'side_effects', 'side_effects_risk', 'side_effects_next_risk']:
             z = self.representation_to_binary_MLP(z) # z dim (batch_size, 1)
 
-            # Clamp logits to prevent sigmoid saturation
             z = torch.clamp(z, min=-10.0, max=10.0)
 
             if self.use_sigmoid:
@@ -864,18 +643,14 @@ class SPARC(pl.LightningModule):
 
             return z
 
-    @classmethod # TOCHECK - see if it works
+    @classmethod
     def custom_load_from_checkpoint(cls, checkpoint_path, load_w_meds = False, **kwargs):
-        """
-        Load the model from a checkpoint file.
-        """
+        """Load a checkpoint, skipping the med_as_feature layers."""
         print("Loading model from checkpoint using custom loader:", checkpoint_path)
         model = cls(**kwargs)
-        # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['state_dict']
 
-        # Filter out med_as_feature-specific layers if they exist in current model
         missing_keys = ['meds_to_single_MLP', 'medandrepresentation_to_representation_MLP']
         filtered_state_dict = {
             k: v for k, v in state_dict.items()
@@ -885,18 +660,14 @@ class SPARC(pl.LightningModule):
         model.load_state_dict(filtered_state_dict, strict=False)
         return model
 
-    @classmethod # TOCHECK - see if it works
+    @classmethod
     def custom_load_from_checkpoint_sideeffect(cls, checkpoint_path, **kwargs):
-        """
-        Load the model from a checkpoint file.
-        """
+        """Load a checkpoint, skipping the num_infusion layers."""
         print("Loading model from checkpoint using custom loader:", checkpoint_path)
         model = cls(**kwargs)
-        # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['state_dict']
 
-        # Filter out med_as_feature-specific layers if they exist in current model
         missing_keys = ["infusion_num_to_single_MLP", "representation_and_infusionnum_to_representation_MLP"]
         filtered_state_dict = {
             k: v for k, v in state_dict.items()
@@ -916,10 +687,8 @@ class SPARC(pl.LightningModule):
                     ((xs, times), y, ctypes, *_), DMP_ID = data
                 else:
                     ((xs, times), y, *_), DMP_ID = data
-                # num_infusion, DMP_ID = None, None  # Initialize for pretraining
             else:
                 if not self.med_as_feature and self.side_effects_num_infusion:
-                    # TODO: just added DMP_ID here for side_effects option, to be removed later
                     if not self.include_gcsf and not self.include_steroid:
                         (xs, times, num_infusion, DMP_ID), y = data
                     elif self.include_gcsf and not self.include_steroid:
@@ -927,7 +696,6 @@ class SPARC(pl.LightningModule):
                     elif not self.include_gcsf and self.include_steroid:
                         (xs, times, num_infusion, DMP_ID, steroid_groundtruth), y = data
                     else:
-                        # error case for now
                         raise ValueError("Currently do not support including both gcsf and steroid groundtruth, please choose one or the other")
                 elif not self.side_effects_num_infusion:
                     (xs, times) , y = data
@@ -949,76 +717,63 @@ class SPARC(pl.LightningModule):
             y = torch.tensor(y).float()
             y = y.unsqueeze(-1)
 
-        # turn times such that it starts from 0 instead
+        # shift times to start at 0
         if time_calibration:
             times = times - times[:, 0].unsqueeze(-1)
 
-        ### TS TRANSFORMER DATA SECTION
         if self.normalization:
             for i in range(xs.size(-1)):
                 mean = xs[:, :, i].nanmean()
                 std = nanstd(xs[:, :, i])
                 xs[:, :, i] = (xs[:, :, i] - mean) / std
 
-        # # concatenate xs and times
-        # if 'basic_lab' in self.modular_featuredim_dict.keys() or 'extra_lab' in self.modular_featuredim_dict.keys() or 'vital' in self.modular_featuredim_dict.keys():
-        #     xs = torch.cat([xs, times.unsqueeze(-1)], dim=-1)
 
-        # perturb a feature given the index if necessary, perturb it to randomly generated values at normal distribution around (mu=0, std=1) per z-score normalization
+        # permutation importance: shuffle the observed values of one feature across the batch
         if perturbation_index != '':
             if perturbation_index >= xs.size(-1):
                 raise ValueError('perturbation_index out of range')
 
-            ## we fetch all non-nan values from that perturbation_index and randomly place them back
-            # extract the slice and flatten
             slice_ = xs[:, :, perturbation_index]
             mask = ~torch.isnan(slice_)
             values = slice_[mask]
 
-            # permute the non-NaN values
             perm = values[torch.randperm(values.size(0))]
 
-            # create new slice and assign permuted values
             new_slice = slice_.clone()
             new_slice[mask] = perm
             xs[:, :, perturbation_index] = new_slice
 
         if self.option == 'pretrain' and self.usage == 'standalone':
-            # the data has already been naturally order, the left most is the last time point
-            last_tp_xs_to_predict = xs[:, 0, :]  # extract last timepoint features
-            last_tp_times = times[:, 0]  # extract last timepoint time
-            xs = xs[:, 1:, :]  # rest of the time points
-            times = times[:, 1:]  # also slice times to match xs dimensions
-            # Concatenate time to last_tp features so it can be split later
+            # t=0 is the most recent visit; predict it from the rest
+            last_tp_xs_to_predict = xs[:, 0, :]
+            last_tp_times = times[:, 0]
+            xs = xs[:, 1:, :]
+            times = times[:, 1:]
+            # append time so it can be split off later
             if 'basic_lab' in self.modular_featuredim_dict.keys() or 'extra_lab' in self.modular_featuredim_dict.keys() or 'vital' in self.modular_featuredim_dict.keys():
                 last_tp_xs_to_predict = torch.cat([last_tp_xs_to_predict, last_tp_times.unsqueeze(-1)], dim=-1)
         else:
             last_tp_xs_to_predict = None
 
-        # Concatenate xs and times before creating mask
+        # append time before building the mask
         if 'basic_lab' in self.modular_featuredim_dict.keys() or 'extra_lab' in self.modular_featuredim_dict.keys() or 'vital' in self.modular_featuredim_dict.keys():
             xs = torch.cat([xs, times.unsqueeze(-1)], dim=-1)
 
-        # Now create mask from xs+times combined
-        mask = torch.isnan(xs) # xs.shape (batch_size, max_time_len, feature_dim+1); True if the value is NaN
-        src_key_padding_mask = mask[:, :, -1].T # dim: (max_time_len, batch_size); True if the time point is padded
+        mask = torch.isnan(xs) # (B, T, F+1), True = NaN
+        src_key_padding_mask = mask[:, :, -1].T # (T, B), True = padded timepoint
 
         if self.missing_mask:
-            # Concatenate missingness indicators: 1 if present, 0 if missing (for ALL features including time)
-            # This doubles the feature dimension: [features+time, missingness_indicators]
-            # Fill NaN with 0 — the indicator tells the model which 0s are imputed vs real.
+            # append observed indicators (incl. time) and fill NaNs with 0
             missingness_indicators = (~mask).float()
             xs[mask] = 0.0
             xs = torch.cat([xs, missingness_indicators], dim=-1)
         else:
-            # No missingness indicator: fill NaN with -10 (a clear out-of-distribution sentinel
-            # in z-score space, so the model treats it as missing rather than as the mean).
+            # no indicators: fill NaNs with -10 (out of range in z-score space)
             xs[mask] = -10.0
 
-        # attach the src_key_padding_mask as a feature so as to tell the model which time points are padded
+        # padding indicator as an extra feature
         padding_indicator = torch.tensor(~src_key_padding_mask).unsqueeze(-1).permute(1, 0, 2)
 
-        # calculate # of non-zero time points per patient
         xs = torch.cat([xs, padding_indicator], dim=-1)
         if self.primary_ctype_returned:
             DMP_ID_demo_extended = (DMP_ID, ctype, cutoffdate)
@@ -1053,7 +808,6 @@ class SPARC(pl.LightningModule):
             current_xs_last_gt = last_tp_xs_to_predict[i]
             current_xs_last_gt_non_nan_mask = ~torch.isnan(current_xs_last_gt)
 
-            # Skip if target has no valid values
             if current_xs_last_gt_non_nan_mask.sum() == 0:
                 continue
 
@@ -1072,7 +826,7 @@ class SPARC(pl.LightningModule):
             print(f"  Batch size: {xs_last_pred.shape[0]}")
             print(f"  last_tp_xs_to_predict shape: {last_tp_xs_to_predict.shape}")
             print(f"  xs_last_pred shape: {xs_last_pred.shape}")
-            for i in range(min(3, xs_last_pred.shape[0])):  # Print first 3 samples
+            for i in range(min(3, xs_last_pred.shape[0])):
                 current_xs_last_gt = last_tp_xs_to_predict[i]
                 current_xs_last_gt_non_nan_mask = ~torch.isnan(current_xs_last_gt)
                 print(f"  Sample {i}: valid targets = {current_xs_last_gt_non_nan_mask.sum().item()}/{current_xs_last_gt.numel()}")
@@ -1095,14 +849,7 @@ class SPARC(pl.LightningModule):
         return loss
 
     def _calculate_weighted_c_index_by_infusion(self, y_pred, y_event, time_to_event, num_infusion, mode='train'):
-        """
-        Calculate weighted C-index stratified by infusion number.
-        Only includes infusions where C-index can be computed.
-
-        Returns:
-            dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                        auroc metrics, and optionally binary_loss (as tensor for backprop)
-        """
+        """C-index and next-infusion metrics, weighted across infusion-number groups."""
         output_dict = {}
         num_infusion_tensor = torch.as_tensor(num_infusion, device=y_pred.device)
         y_event_tensor = torch.as_tensor(y_event, device=y_pred.device)
@@ -1111,11 +858,9 @@ class SPARC(pl.LightningModule):
         unique_infusions = torch.unique(num_infusion_tensor)
         risk_scores = y_pred.squeeze()
 
-        # ========================================================================
-        # Part 1: Risk prediction metrics (C-index)
-        # ========================================================================
+        # --- C-index (risk tasks) ---
         if 'risk' in self.option:
-            # First pass: identify valid infusions (has both events and censoring)
+            # groups with both events and censoring
             valid_infusions = []
             for infusion in unique_infusions:
                 mask = num_infusion_tensor == infusion
@@ -1124,7 +869,7 @@ class SPARC(pl.LightningModule):
                 if current_events.sum() > 0 and current_events.sum() < len(current_events):
                     valid_infusions.append(infusion)
 
-            # Calculate raw C-index (no stratification)
+            # unstratified C-index
             try:
                 c_idx_raw = self.c_index(
                     risk_scores.unsqueeze(1),
@@ -1134,14 +879,12 @@ class SPARC(pl.LightningModule):
             except Exception:
                 c_idx_raw = 0.5
 
-            # Initialize with defaults
             c_index_weighted = 0.5
             overall_c_index = 0.5
             num_groups = 0
             total_samples = 0
             computable_results = []
             if len(valid_infusions) > 0:
-                # Second pass: compute C-index for valid infusions
                 for infusion in valid_infusions:
                     mask = num_infusion_tensor == infusion
                     current_risk = risk_scores[mask]
@@ -1165,13 +908,12 @@ class SPARC(pl.LightningModule):
                     except Exception:
                         continue
             if len(computable_results) > 0:
-                # Calculate weighted C-index
                 total_samples = sum(r['num_samples'] for r in computable_results)
                 c_index_weighted = sum(
                     r['c_index'] * r['num_samples'] / total_samples
                     for r in computable_results
                 )
-                # Calculate overall C-index
+                # C-index over all valid groups pooled
                 all_mask = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
                 for r in computable_results:
                     all_mask |= r['mask']
@@ -1195,36 +937,24 @@ class SPARC(pl.LightningModule):
                 'num_samples': total_samples,
                 'per_infusion': computable_results,
             })
-        # ========================================================================
-        # Part 2: Next-infusion side effect prediction (AUROC)
-        # ========================================================================
-
-        # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
-        ### flattened tensors
+        # --- next-infusion AUROC ---
+        # positive = side effect at the next infusion
         time_to_event_tensor = time_to_event_tensor.flatten()
         next_infusion_event = ((y_event_tensor == 1) & (time_to_event_tensor == 1)).float()
-        # next_infusion_event = ((y_event_tensor == 1) & (time_to_event_tensor == 0)).float()
 
-        # # DEBUG: Print statistics about the labels
-        # if mode in ['test', 'val']:
-        #     n_y_event_1 = (y_event_tensor == 1).sum().item()
-        #     n_time_1 = (time_to_event_tensor == 1).sum().item()
-        #     n_next_inf_1 = next_infusion_event.sum().item()
-            # print(f"[{mode}] AUROC labels: y_event=1: {n_y_event_1}, time_to_event=1: {n_time_1}, next_infusion_event=1: {n_next_inf_1}, total: {len(next_infusion_event)}")
 
         valid_infusions_auroc = []
         for infusion in unique_infusions:
             mask = num_infusion_tensor == infusion
             current_next_events = next_infusion_event[mask]
 
-            # Valid if has both positives and negatives
+            # need both positives and negatives
             has_positives = current_next_events.sum() > 0
             has_negatives = current_next_events.sum() < len(current_next_events)
 
             if has_positives and has_negatives:
                 valid_infusions_auroc.append(infusion)
 
-        # Initialize defaults
         auroc_next_weighted = 0.5
         auroc_next_overall = 0.5
         accuracy_next_weighted = 0.5
@@ -1234,13 +964,12 @@ class SPARC(pl.LightningModule):
         auprc_next_overall = 0.5
         num_groups_auroc = 0
         num_samples_auroc = 0
-        binary_loss_weighted = None  # Will be tensor if binary mode
+        binary_loss_weighted = None
 
         if len(valid_infusions_auroc) > 0:
-            # Second pass: compute AUROC for valid infusions
             computable_auroc_results = []
 
-            # calculate binary loss across all samples for vectorized comparison
+            # per-sample BCE once, then sliced per group
             all_sample_losses = self.loss_fn(
                 risk_scores.unsqueeze(-1),
                 next_infusion_event.unsqueeze(-1)
@@ -1253,7 +982,6 @@ class SPARC(pl.LightningModule):
                 try:
                     current_res = {'num_samples': mask.sum().item()}
                     if mode != 'train':
-                        # Calculate metrics
                         auroc = self.auroc(current_risk, current_next_events.int())
                         accuracy = self.accuracy(current_risk, current_next_events.int())
                         precision = self.precision(current_risk, current_next_events.int())
@@ -1272,10 +1000,10 @@ class SPARC(pl.LightningModule):
                             'mask': mask
                         }
 
-                    # Calculate binary loss (keep as tensor for backprop!)
+                    # keep as tensor for backprop
                     if 'risk' not in self.option:
                         binary_loss = all_sample_losses[mask].mean()
-                        current_res['binary_loss'] = binary_loss  # Keep as tensor
+                        current_res['binary_loss'] = binary_loss
 
                     computable_auroc_results.append(current_res)
 
@@ -1284,7 +1012,6 @@ class SPARC(pl.LightningModule):
                     continue
 
             if len(computable_auroc_results) > 0:
-                # Calculate weighted metrics
                 total_samples_auroc = sum(r['num_samples'] for r in computable_auroc_results)
                 if mode != 'train':
                     auroc_next_weighted = sum(
@@ -1308,7 +1035,6 @@ class SPARC(pl.LightningModule):
                         for r in computable_auroc_results
                     )
                     output_dict.update({
-                        # Next-infusion prediction metrics
                         'auroc_next_infusion_weighted': auroc_next_weighted,
                         'accuracy_next_infusion_weighted': accuracy_next_weighted,
                         'precision_next_infusion_weighted': precision_next_weighted,
@@ -1318,14 +1044,13 @@ class SPARC(pl.LightningModule):
                         'per_infusion_auroc': computable_auroc_results
                     })
 
-                # Calculate weighted binary loss (keep as tensor!)
                 if 'risk' not in self.option:
                     binary_loss_weighted = torch.stack([
                         r['binary_loss'] * r['num_samples'] / total_samples_auroc
                         for r in computable_auroc_results
                     ]).sum()
                 if mode != 'train':
-                    # Calculate overall AUROC across all valid samples
+                    # pooled AUROC / AUPRC over valid groups
                     all_mask_auroc = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
                     for r in computable_auroc_results:
                         all_mask_auroc |= r['mask']
@@ -1339,7 +1064,6 @@ class SPARC(pl.LightningModule):
                         auroc_next_overall = 0.5
                     output_dict['auroc_next_infusion_overall'] = auroc_next_overall
 
-                    # Calculate overall AUPRC across all valid samples
                     try:
                         auprc_next_overall = self.auprc(
                             risk_scores[all_mask_auroc],
@@ -1354,10 +1078,9 @@ class SPARC(pl.LightningModule):
 
         else:
             if mode in ['train']:
-                return None # to be skipped in trainer loop so that no backprop is done
+                return None # skipped by the trainer, no backprop
             else:
                 output_dict.update({
-                    # Next-infusion prediction metrics
                     'auroc_next_infusion_weighted': auroc_next_weighted,
                     'auroc_next_infusion_overall': auroc_next_overall,
                     'accuracy_next_infusion_weighted': accuracy_next_weighted,
@@ -1369,9 +1092,8 @@ class SPARC(pl.LightningModule):
                     'num_samples_next_infusion': num_samples_auroc,
                     'per_infusion_auroc': [],
                 })
-        # Add binary loss as tensor (for backprop) if in binary mode
         if 'risk' not in self.option and binary_loss_weighted is not None:
-            output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
+            output_dict['binary_loss'] = binary_loss_weighted  # tensor, not .item()
             output_dict['num_samples_next_infusion'] = num_samples_auroc
 
         return output_dict
@@ -1403,14 +1125,12 @@ class SPARC(pl.LightningModule):
                 y_pred = self(xs_combined, src_key_padding_mask=src_key_padding_mask_combined, num_infusion=num_infusion, steroid_groundtruth=steroid_groundtruth)
             else:
                 y_pred = self(xs_combined, src_key_padding_mask=src_key_padding_mask_combined, num_infusion=num_infusion, gcsf_groundtruth=gcsf_groundtruth)
-            # apply platt scaling when available
             platt_scaler = getattr(self, 'platt_scaler', None)
             if platt_scaler is not None:
-                y_pred = y_pred.cpu().detach().numpy()  # move to CPU and convert to numpy for platt scaler
-                y_pred = y_pred.reshape(-1, 1)  # reshape if necessary for platt scaler
-                y_pred = sm.add_constant(y_pred)  # add intercept term for platt scaler
-                y_pred = platt_scaler.predict_proba(y_pred)[:, 1]  # get probability of positive class
-                # push back to same device
+                y_pred = y_pred.cpu().detach().numpy()
+                y_pred = y_pred.reshape(-1, 1)
+                y_pred = sm.add_constant(y_pred)  # intercept column
+                y_pred = platt_scaler.predict_proba(y_pred)[:, 1]
                 y_pred = torch.tensor(y_pred, device=xs_combined[0].device).unsqueeze(1).float()
 
             if not self.include_gcsf and not self.include_steroid:
@@ -1425,22 +1145,16 @@ class SPARC(pl.LightningModule):
                 out['cutoffdate'] = DMP_ID_demo_extended[2]
             return out
 
-    ### BELOW IS ALL THE PYTORCH LIGHTNING THINGIS
+    # --- lightning hooks ---
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         print("====TORCH VERSION=====", torch.__version__)
 
-        # The original code used a 'scheduler' key instead of 'lr_scheduler',
-        # which caused PyTorch Lightning to silently ignore the ReduceLROnPlateau scheduler.
-        # The model actually trained better with constant LR, so we're keeping that behavior.
-        # To use a scheduler, uncomment one of the options below:
-
+        # 'default': constant learning rate
         if self.schedule == 'default':
-            # Option 1: No scheduler (constant LR - matches original working behavior)
             return optimizer
 
         elif self.schedule == 'exponential':
-            # Option 2: Gentle ExponentialLR decay (uncomment to use)
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
             return {
                 'optimizer': optimizer,
@@ -1450,7 +1164,6 @@ class SPARC(pl.LightningModule):
                 }
             }
         else:
-            # Option 3: ReduceLROnPlateau with gentler settings (uncomment to use)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=10, verbose=True
             )
@@ -1484,7 +1197,6 @@ class SPARC(pl.LightningModule):
             last_tp_xs_to_predict, last_tp_times = last_tp_xs_to_predict[:, :-1], last_tp_xs_to_predict[:, -1]
             xs_rep, xs_last_pred = self(xs_combined, src_key_padding_mask=src_key_padding_mask_combined, last_tp_times=last_tp_times, num_infusion=num_infusion)
 
-            # Compute base pretraining loss (MSE on autoregressive/delta target)
             pretrain_loss = self._compute_pretrain_loss(xs_rep, xs_last_pred, last_tp_xs_to_predict, ctypes)
 
             loss = pretrain_loss
@@ -1503,8 +1215,7 @@ class SPARC(pl.LightningModule):
                 cox_loss = cox.neg_partial_log_likelihood(y_pred, y_event, time_to_event, ties_method = "efron")
 
                 if self.loss_option == 'hybrid':
-                    # Calculate BCE loss for current infusion event prediction
-                    # Current infusion event: y_event==1 AND time_to_event==1 (event at next infusion)
+                    # BCE on the next-infusion event (y_event==1 and time_to_event==1)
                     current_infusion_event = ((y_event == 1) & (time_to_event == 1)).float()
                     bce_loss = self.bce_loss_fn(y_pred.squeeze(), current_infusion_event)
                     loss = cox_loss + 20 * bce_loss
@@ -1525,7 +1236,6 @@ class SPARC(pl.LightningModule):
             time_to_events = torch.tensor(y[1]).float().to(y_pred_logits.device)
             loss = cox.neg_partial_log_likelihood(y_pred_logits, fail_indicators, time_to_events, ties_method = "efron")
 
-        # Periodic GPU cache clearing to prevent memory fragmentation slowdown
         if batch_idx % 100 == 0:
             torch.cuda.empty_cache()
 
@@ -1550,13 +1260,9 @@ class SPARC(pl.LightningModule):
                 xs_combined, ctypes = xs_combined
             else:
                 ctypes = None
-            # print(f"DEBUG validation_step: before split last_tp_xs_to_predict shape={last_tp_xs_to_predict.shape}")
             last_tp_xs_to_predict, last_tp_times = last_tp_xs_to_predict[:, :-1], last_tp_xs_to_predict[:, -1]
-            # print(f"DEBUG validation_step: after split last_tp_xs_to_predict shape={last_tp_xs_to_predict.shape}, last_tp_times shape={last_tp_times.shape}")
             xs_rep, xs_last_pred = self(xs_combined, src_key_padding_mask=src_key_padding_mask_combined, last_tp_times=last_tp_times, num_infusion=num_infusion)
-            # print(f"DEBUG validation_step: xs_last_pred shape={xs_last_pred.shape}")
 
-            # Compute base pretraining loss
             pretrain_loss = self._compute_pretrain_loss(xs_rep, xs_last_pred, last_tp_xs_to_predict, ctypes)
 
             loss = pretrain_loss
@@ -1596,7 +1302,7 @@ class SPARC(pl.LightningModule):
                 cox_loss = cox.neg_partial_log_likelihood(y_pred, y_event, time_to_event, ties_method = "efron")
 
                 if self.loss_option == 'hybrid':
-                    # Calculate BCE loss for current infusion event prediction
+                    # BCE on the next-infusion event
                     current_infusion_event = ((y_event == 1) & (time_to_event == 1)).float()
                     bce_loss = self.bce_loss_fn(y_pred.squeeze(), current_infusion_event)
                     loss = cox_loss + 20 * bce_loss
@@ -1629,7 +1335,6 @@ class SPARC(pl.LightningModule):
 
             self.log('val_c_index', c_index, prog_bar=True)
 
-        # Periodic GPU cache clearing to prevent memory fragmentation slowdown
         if batch_idx % 50 == 0:
             torch.cuda.empty_cache()
 
@@ -1637,31 +1342,73 @@ class SPARC(pl.LightningModule):
         return loss
 
     def load_state_dict(self, state_dict, strict=True):
-        """Load non-strictly, tolerating benign key mismatches between a
-        checkpoint and the current architecture."""
-        return super().load_state_dict(state_dict, strict=False)
+        """Non-strict load that reports missing and unexpected keys."""
+        result = super().load_state_dict(state_dict, strict=False)
+        missing, unexpected = result.missing_keys, result.unexpected_keys
+        if missing or unexpected:
+            n_own = len(self.state_dict())
+            print(f"[load_state_dict] missing={len(missing)} unexpected={len(unexpected)} "
+                  f"(model has {n_own} entries)")
+            for label, keys in (("missing", missing), ("unexpected", unexpected)):
+                if keys:
+                    print(f"  {label}: {keys[:8]}{' ...' if len(keys) > 8 else ''}")
+            if n_own and len(missing) > 0.5 * n_own:
+                print("WARNING: over half of the model's weights are missing from the checkpoint; "
+                      "check use_module_tokenizer / batch_first / module_index_cfg.")
+        return result
+
+    # architecture flags saved with each checkpoint (batch_first can't be inferred from the weights)
+    ARCH_STAMP_KEYS = ('use_module_tokenizer', 'use_continuous_time', 'batch_first',
+                       'n_static_features', 'missing_mask', 'temporal_aggregation')
+
+    def _arch_stamp(self):
+        return {k: getattr(self, k, None) for k in self.ARCH_STAMP_KEYS}
+
+    def on_save_checkpoint(self, checkpoint):
+        """Save the architecture flags with the checkpoint."""
+        checkpoint['sparc_arch'] = self._arch_stamp()
+        super().on_save_checkpoint(checkpoint)
+
+    def check_arch_stamp(self, checkpoint, strict=False):
+        """Architecture flags that differ from the checkpoint's, or None if it has none saved."""
+        stamp = checkpoint.get('sparc_arch') if isinstance(checkpoint, dict) else None
+        if not stamp:
+            print("[arch] checkpoint has no saved architecture flags; batch_first and "
+                  "use_module_tokenizer can't be checked against it")
+            return None
+        mine = self._arch_stamp()
+        diff = [k for k in self.ARCH_STAMP_KEYS if stamp.get(k) != mine.get(k)]
+        if diff:
+            print("WARNING: model architecture differs from the checkpoint:")
+            for k in diff:
+                print(f"  {k}: checkpoint={stamp.get(k)!r}  model={mine.get(k)!r}")
+            if strict:
+                raise RuntimeError(f"checkpoint/model architecture mismatch on {diff}")
+        else:
+            print(f"[arch] stamp verified: {mine}")
+        return diff
 
     def on_load_checkpoint(self, checkpoint):
-        """Drop optimizer state when a checkpoint's architecture does not match."""
-        # For checkpoints predating an architectural change,
-        # drop the optimizer state completely to avoid parameter mismatch errors.
-        # The model weights and epoch counter will be preserved, but optimizer starts fresh.
+        """Refuse a batch_first mismatch; drop optimizer state if param counts differ."""
+        _diff = self.check_arch_stamp(checkpoint)
+        if _diff and 'batch_first' in _diff:
+            raise RuntimeError(
+                "checkpoint was trained with batch_first="
+                f"{checkpoint['sparc_arch'].get('batch_first')!r} but the model was built with "
+                f"batch_first={self.batch_first!r}; pass the matching -bf / batch_first")
+        # drop optimizer state saved for a different set of parameters
         if 'optimizer_states' in checkpoint:
-            # Check if there's a parameter count mismatch
             num_current_params = len(list(p for p in self.parameters() if p.requires_grad))
 
-            # Try to get the old parameter count from optimizer state
             has_mismatch = False
             for opt_state in checkpoint['optimizer_states']:
                 if 'state' in opt_state and len(opt_state['state']) > 0:
-                    # Get max parameter index in old optimizer state
                     max_old_idx = max(k for k in opt_state['state'].keys() if isinstance(k, int))
                     if max_old_idx >= num_current_params:
                         has_mismatch = True
                         break
 
             if has_mismatch:
-                # Drop optimizer state completely - safest approach
                 checkpoint['optimizer_states'] = []
                 if 'lr_schedulers' in checkpoint:
                     checkpoint['lr_schedulers'] = []
@@ -1702,11 +1449,10 @@ class SPARC(pl.LightningModule):
                 y_pred = self(xs_combined, src_key_padding_mask=src_key_padding_mask_combined, num_infusion=num_infusion, gcsf_groundtruth=gcsf_groundtruth)
             platt_scaler = getattr(self, "platt_scaler", None)
             if platt_scaler is not None:
-                y_pred = y_pred.cpu().detach().numpy()  # move to CPU and convert to numpy for platt scaler
-                y_pred = y_pred.reshape(-1, 1)  # reshape if necessary for platt scaler
-                y_pred = sm.add_constant(y_pred)  # add intercept term for platt scaler
-                y_pred = platt_scaler.predict_proba(y_pred)[:, 1]  # get probability of positive class
-                # push back to same device
+                y_pred = y_pred.cpu().detach().numpy()
+                y_pred = y_pred.reshape(-1, 1)
+                y_pred = sm.add_constant(y_pred)  # intercept column
+                y_pred = platt_scaler.predict_proba(y_pred)[:, 1]
                 y_pred = torch.tensor(y_pred, device=xs_combined[0].device).unsqueeze(1).float()
             if self.option == 'binary' or self.option == 'side_effects':
                 if self.option == 'binary':
@@ -1726,7 +1472,6 @@ class SPARC(pl.LightningModule):
                     weighted_auroc, overall_auroc, accuracy, precision, recall, auprc = res_dict.get('auroc_next_infusion_weighted'), res_dict.get('auroc_next_infusion_overall'), res_dict.get('accuracy_next_infusion_weighted'), res_dict.get('precision_next_infusion_weighted'), res_dict.get('recall_next_infusion_weighted'), res_dict.get('auprc_next_infusion_weighted')
                     if self.test_metrics_by_infusion_group:
                         per_infusion_auroc = res_dict.get('per_infusion_auroc')
-                        # log per-infusion group metrics
                         for res in per_infusion_auroc:
                             infusion_id = res['infusion']
                             self.log(f'test_auroc_infusion_{infusion_id}', res['auroc'], prog_bar=False)
@@ -1739,7 +1484,7 @@ class SPARC(pl.LightningModule):
                 self.log('test_recall', recall, prog_bar=True)
                 self.log('test_auprc', auprc, prog_bar=True)
             else:
-                # it's now a risk prediction task with side effects as outcome
+                # side_effects_risk / side_effects_next_risk
                 y_event, time_to_event = torch.tensor(y[0]).to(y_pred.device), torch.tensor(y[1]).float().to(y_pred.device)
                 loss = cox.neg_partial_log_likelihood(y_pred, y_event, time_to_event, ties_method = "efron")
 
