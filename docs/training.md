@@ -54,8 +54,8 @@ evaluation both write `test_predictions.csv`:
 | `score` | Predicted probability (binary tasks) or risk score (`_risk` tasks). |
 
 !!! note
-    The encoder attends across the samples in a batch, so a score depends on the rest of its
-    batch. The CSV uses the same shuffled `-bs` batches (seeded by `-r`) as the logged metrics
+    With `-bf False` the encoder attends across the samples in a batch, so a score depends on
+    the rest of its batch. The CSV uses the same shuffled `-bs` batches (seeded by `-r`) as the logged metrics
     and the paper. The logged test metrics average per-batch values, while the paper's, like any
     metric over the whole CSV, pool all samples (published neutropenia model, fold 0: AUROC 0.65
     logged, 0.71 pooled). Score many samples together: another shuffle moves AUROC by less than
@@ -131,6 +131,7 @@ models.
 | `-n` | `num_tp` | `20` | Visits per sample. |
 | `-tp` | `time_processing` | `attention` | How visits are pooled: `attention`, `minmaxmean` or `mlp`. |
 | `-umt`, `-uct`, `-pmd` | `use_module_tokenizer`, `use_continuous_time`, `post_mlp_dropout` | `False`, `True`, model default | Model settings; the published models use `True`, `True`, `0.2`. |
+| `-bf` | `batch_first` | `True` | `True` makes the encoder attend over time; `False` rebuilds models trained with the earlier encoder, which attends across the batch. Checkpoints record the value and refuse to load with the other one; older checkpoints without it load either way, so pass the value used in training. |
 | `-bs` | `batch_size` | `512` | Batch size. |
 | `-acc` | `accelerator` | `auto` | `auto`, `gpu` or `cpu`. |
 | `-r` | `rseed` | `1024` | Random seed. |

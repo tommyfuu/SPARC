@@ -62,3 +62,25 @@ def test_eval_needs_trained_fold(data_root, pretrained, tmp_path):
         evaluate(volume_path=str(data_root), option='binary', pretrained_model_path=pretrained,
                  output_model_path=str(tmp_path / 'never_trained'), **COMMON)
 
+
+def test_batch_first_scores_do_not_depend_on_batch():
+    import io
+    from contextlib import redirect_stdout
+
+    from MSK_featurename_list import MSK_numfeature_dict
+    from SPARC_inf_risk_modular import SPARC
+
+    dims = {'basic_lab': MSK_numfeature_dict['basic_lab'], 'cbc_differential': 5,
+            'basic_vitals': MSK_numfeature_dict['basic_vitals'], 'gender': 1, 'age': 1}
+    torch.manual_seed(0)
+    with redirect_stdout(io.StringIO()):
+        model = SPARC(dims, option='binary', temporal_aggregation='attention', batch_first=True,
+                      d_model=32, nhead=2, num_encoder_layers=1, dim_feedforward=64).eval()
+    src = torch.randn(4, 6, model.total_feature_dim)
+    padded = torch.zeros(6, 4, dtype=torch.bool)                                 # (time, batch)
+    padded[3:, 1] = True
+    with torch.no_grad():
+        together = model(src, src_key_padding_mask=padded)
+        alone = torch.cat([model(src[i:i + 1], src_key_padding_mask=padded[:, i:i + 1]) for i in range(4)])
+    torch.testing.assert_close(together, alone)
+

@@ -12,5 +12,6 @@ time_processing: attention
 use_module_tokenizer: true
 use_continuous_time: true
 post_mlp_dropout: 0.2
+batch_first: true               # false only for models trained with the earlier encoder
 epochs: 300
 early_stop_patience: 50
