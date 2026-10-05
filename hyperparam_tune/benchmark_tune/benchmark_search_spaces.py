@@ -11,9 +11,6 @@ SEARCH_SPACES = {
         "max_time_len": [20],
     },
     'duett': {
-        # Shifted up from [1e-4, 1e-5, 1e-6], which was boundary-optimal: 1e-4
-        # was its maximum and won 4 of 7 tasks. The rewritten DuETT is also
-        # ~200k parameters against the old variant's ~10.9M.
         "num_encoder_layers": [4],           # -> 2 layers per axis
         "lr": [1e-3, 3e-4, 1e-4],
         "dropout": [0.1],
@@ -44,8 +41,7 @@ ADVANCED_MODEL = {
     'rnn_deephit': 'rnn_deephit',
 }
 
-# Per-model run-directory template. These reproduce the names already on disk;
-# changing one orphans every run tuned before the change.
+# per-model run-directory template; must match the names already on disk
 _DIRNAME = {
     'lasttp_MLP':  '{m}_{o}_hyperparam_tune_nl_{num_layers}_lr_{lr}_wd_{weight_decay}_max_time_len_{max_time_len}',
     'duett':       '{m}_{o}_hyperparam_tune_nl_{num_encoder_layers}_lr_{lr}_max_time_len_{max_time_len}',

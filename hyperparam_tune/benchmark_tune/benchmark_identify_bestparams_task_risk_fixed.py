@@ -1,15 +1,7 @@
-"""Pick the best hyperparameters per task from a benchmark tuning sweep.
+"""Pick the best hyperparameters per task (min val_loss) from a benchmark tuning sweep;
+writes {BENCHMARK_CONFIG_DIR}/{model}_best_hyperparams.json.
 
-benchmark_tune_task_risk_fixed.py trains one model per grid point and logs
-val_loss. This walks those run directories, takes each run's minimum val_loss,
-and writes the winner per task to
-
-    {BENCHMARK_CONFIG_DIR}/{model}_best_hyperparams.json
-
-Run like:
-
-    python benchmark_identify_bestparams_task_risk_fixed.py -mo duett
-    python benchmark_identify_bestparams_task_risk_fixed.py -mo rnn -n      # dry run
+Usage: python benchmark_identify_bestparams_task_risk_fixed.py -mo duett [-n]   # -n: dry run
 """
 import argparse
 import json
@@ -69,8 +61,7 @@ print(f'  output dir : {out_dir}')
 
 
 def min_val_loss(run_dir):
-    """Lowest val_loss across a run's Lightning versions, or None if it has
-    none -- a grid point never trained, or dead before its first validation."""
+    """Lowest val_loss across a run's Lightning versions, or None if it never validated."""
     logs = os.path.join(run_dir, 'logs_csv', 'lightning_logs_csv')
     if not os.path.isdir(logs):
         return None
