@@ -1,68 +1,20 @@
-"""
-sparc_paths.py -- one place for every cluster-specific path in this repo.
+"""Cluster-specific paths for the repo; override with SPARC_DATA_PATH, SPARC_MODEL_PATH, SPARC_RESULTS_PATH.
 
-Porting the repo to a new cluster should require editing this file, or
-exporting the environment variables below. No other script should contain an
-absolute path that cannot be overridden.
-
-Environment variables
----------------------
-    SPARC_DATA_PATH      root holding the per-dataset data volumes
-                         (MSK_CAIA/, MIMICIV_hosp/, MSK/, stanfordEHRSHOT/, ...)
-    SPARC_MODEL_PATH     root for models this repo trains
-    SPARC_RESULTS_PATH   root for evaluation outputs and figures
-
-Anything more specific is derived from those three, so a new cluster normally
-only needs:
-
-    export SPARC_DATA_PATH=/new/cluster/SPARC_data
-    export SPARC_MODEL_PATH=/new/cluster/SPARC_models
-    export SPARC_RESULTS_PATH=/new/cluster/SPARC_fixed_models
-
-Importing
----------
-A script cannot `import sparc_paths` until the repo root is on sys.path, so
-each script starts with a short bootstrap that walks up from __file__ to the
-directory containing data/ and models/. Copy this block verbatim:
-
-    # --- SPARC bootstrap: cwd- and depth-independent imports -------------
-    import os, sys
-    _R = os.path.dirname(os.path.abspath(__file__))
-    while _R != os.path.dirname(_R) and not all(
-            os.path.isdir(os.path.join(_R, _d)) for _d in ('data', 'models')):
-        _R = os.path.dirname(_R)
-    for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
-        if _p not in sys.path:
-            sys.path.insert(0, _p)
-    # ---------------------------------------------------------------------
-
-after which `import sparc_paths` and `from data_loaders_inf_risk_fixed import *`
-both work from any working directory.
-
-Why a walk rather than a fixed number of dirname() calls: scripts in this repo
-sit at three different depths (model_train/, results_vis/,
-interpretation/interp_fix_0622626/lime/), and files get moved between them.
+Scripts put the repo root on sys.path (walking up from __file__ to the dir holding data/ and models/)
+before `import sparc_paths`. Run directly to print the resolved paths.
 """
 
 import os
 
-# ---------------------------------------------------------------------------
-# Repo layout (derived from this file's location -- never configure this)
-# ---------------------------------------------------------------------------
+# repo layout, derived from this file
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(REPO_ROOT, 'data')
 MODELS_DIR = os.path.join(REPO_ROOT, 'models')
 BENCHMARKS_DIR = os.path.join(MODELS_DIR, 'benchmarks')
 HYPERPARAM_DIR = os.path.join(REPO_ROOT, 'hyperparam_tune')
 
-# ---------------------------------------------------------------------------
-# Cluster-specific roots. These are the only values a port needs to change.
-#
-# DATA_ROOT points at the lilac transfer copy, which is the live one. Note
-# /data1/morrisq/fuc/SPARC_data also exists but is a stale partial copy whose
-# MSK_CAIA bundle is missing DMP_ID_to_cutoff_day_dict and
-# DMP_ID_to_fold_num_dict; several scripts used to default there and failed.
-# ---------------------------------------------------------------------------
+# cluster-specific roots
+# /data1/morrisq/fuc/SPARC_data is a stale partial copy (no cutoff-day / fold dicts); use the lilac copy.
 DATA_ROOT = os.environ.get(
     'SPARC_DATA_PATH',
     '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_data')
@@ -75,24 +27,31 @@ RESULTS_ROOT = os.environ.get(
     'SPARC_RESULTS_PATH',
     '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models')
 
-# Checkpoints for the 060726 SPARC / SPARC-P runs live in a sibling of
-# RESULTS_ROOT. eval_1 derives the benchmark root by stripping '_060726', so
-# the two must stay a matched pair.
-SPARC_MODEL_ROOT = os.environ.get(
-    'SPARC_060726_MODEL_PATH', RESULTS_ROOT + '_060726')
+# published (batch_first=False) SPARC / SPARC-P checkpoints; benchmarks are in RESULTS_ROOT
+SPARC_PUBLISHED_MODEL_ROOT = os.environ.get(
+    'SPARC_PUBLISHED_MODEL_PATH', RESULTS_ROOT + '_060726')
+BENCHMARK_MODEL_ROOT = os.environ.get('SPARC_BENCHMARK_MODEL_PATH', RESULTS_ROOT)
+# batch_first=True MSK-CAIA models (default). For the published bf=False results set
+# SPARC_060726_MODEL_PATH to SPARC_PUBLISHED_MODEL_ROOT and pass -bf False.
+SPARC_BF_MODEL_ROOT = os.environ.get(
+    'SPARC_BF_MODEL_PATH', '/data1/morrisq/fuc/SPARC_CAIA_092426')
+SPARC_MODEL_ROOT = os.environ.get('SPARC_060726_MODEL_PATH', SPARC_BF_MODEL_ROOT)
+BATCH_FIRST_DEFAULT = True
+# bf=True evaluation results and figures
+SPARC_RESULTS_VIS_ROOT = os.environ.get(
+    'SPARC_RESULTS_VIS_PATH', os.path.join(SPARC_BF_MODEL_ROOT, 'results_vis_eval1_bfTrue'))
+SPARC_LIME_BF_DIR = os.environ.get(
+    'SPARC_LIME_BF_DIR', os.path.join(SPARC_RESULTS_VIS_ROOT, 'lime_fixed_bfTrue'))
+SPARC_TITRATION_RESULTS_DIR = os.environ.get(
+    'SPARC_TITRATION_RESULTS_DIR',
+    os.path.join(SPARC_RESULTS_VIS_ROOT, 'results_trainsize_bfTrue'))
 
-# Side-effect models retrained with -wbce False (unweighted BCE), used as the
-# 'vanilla' arm of design choice 1. Transferred from lilac
-# /data/morrisq/fuc/SPARC_fixed_models_092126.
+# side-effect models trained with -wbce False: the 'vanilla' arm of design choice 1
 SPARC_MODEL_ROOT_VANILLA = os.environ.get(
     'SPARC_MODEL_ROOT_VANILLA',
-    os.path.join(os.path.dirname(SPARC_MODEL_ROOT), 'SPARC_fixed_models_092126'))
+    os.path.join(os.path.dirname(SPARC_PUBLISHED_MODEL_ROOT), 'SPARC_fixed_models_092126'))
 
-# ---------------------------------------------------------------------------
-# Derived locations. Each is independently overridable, because some of them
-# were already honoured as environment variables before this module existed
-# and scripts in the wild may still set them.
-# ---------------------------------------------------------------------------
+# derived locations, each overridable
 COHORT_SUMMARIES_DIR = os.environ.get(
     'SPARC_COHORT_SUMMARIES_DIR',
     os.path.join(RESULTS_ROOT, 'results_vis', 'cohort_summaries'))
@@ -130,20 +89,13 @@ MIMIC_RAW_DIR = os.environ.get(
     'SPARC_MIMIC_RAW', os.path.join(os.path.dirname(os.path.normpath(DATA_ROOT)),
                                     'mimic_iv_3.1_mult', 'hosp'))
 
-# ---------------------------------------------------------------------------
-# Roots that no longer exist on this filesystem. They are kept configurable so
-# the code paths that reference them stay portable, but nothing here resolves
-# today -- see code_cleaning_progress.md.
-# ---------------------------------------------------------------------------
+# roots that no longer exist on this filesystem; kept configurable
 
-# Read by eval_1 only for MIMICIV_hosp + XGBoost + `-z False`. `zeroshot`
-# defaults to True and no launcher passes -z, so this branch never executes;
-# it would fail immediately if it did.
+# eval_1, MIMICIV_hosp + XGBoost + -z False only (not reached by default)
 SL_TESTSL_ROOT = os.environ.get(
     'SPARC_SL_TESTSL_ROOT', '/data/morrisq/fuc/SPARC_fixed_models_testsl')
 
-# Inputs to the one-off fold-generation script data/data_split.py, which is
-# imported by nothing and runs its work at module import.
+# inputs to the one-off data/data_split.py
 FROZEN_DATA_DIR = os.environ.get(
     'SPARC_FROZEN_DATA_DIR', '/data/morrisq/fuc/frozen_step6_dePHI-ed_data_101623')
 CTFM_DIR = os.environ.get('SPARC_CTFM_DIR', '/data/morrisq/fuc/CTFoundationModel')
@@ -155,11 +107,7 @@ def benchmark_model_dir(model_option):
 
 
 def add_benchmark_to_path(model_option):
-    """Put a benchmark's module directory on sys.path, cwd-independently.
-
-    Replaces `sys.path.append(f'../../models/benchmarks/{model_option}/')`,
-    which only worked when the script was run from its own directory.
-    """
+    """Put a benchmark's module directory on sys.path."""
     import sys
     p = benchmark_model_dir(model_option)
     if p not in sys.path:
@@ -168,7 +116,7 @@ def add_benchmark_to_path(model_option):
 
 
 def describe():
-    """Print the resolved configuration -- useful when porting."""
+    """Print the resolved paths, marking ones missing on this filesystem."""
     rows = [
         ('REPO_ROOT', REPO_ROOT, None),
         ('DATA_ROOT', DATA_ROOT, 'SPARC_DATA_PATH'),
