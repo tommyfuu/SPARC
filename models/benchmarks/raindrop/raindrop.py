@@ -66,12 +66,8 @@ class PositionalEncodingTF(nn.Module):
 def nanstd(x):
     return torch.sqrt(torch.nanmean((x - torch.nanmean(x))**2))
 def obprop_safe(ob_layer, stepdata, edge_index, edge_weights=None, edge_attr=None):
-    """
-    Safe wrapper for an Observation_progation layer: handles NaNs, all-zero
-    inputs, or invalid shapes. (Same safety behavior as the old
-    transconv_safe; renamed/adapted since the graph layer is now
-    Raindrop_v2's Observation_progation instead of a plain TransformerConv.)
-    """
+    """Run an Observation_progation layer, falling back to zeros on NaNs, all-zero
+    inputs or invalid shapes."""
     if torch.isnan(stepdata).any():
         print("WARNING: NaNs in stepdata — replacing with zeros")
         stepdata = torch.nan_to_num(stepdata, nan=0.0)
@@ -96,7 +92,7 @@ def obprop_safe(ob_layer, stepdata, edge_index, edge_weights=None, edge_attr=Non
         out = torch.zeros_like(stepdata)
         attn = (edge_index, torch.zeros(edge_index.shape[1], 1, device=stepdata.device))
 
-    # Final safety net
+    # final NaN check
     if torch.isnan(out).any():
         print("WARNING: NaNs in ob_propagation output — zeroing")
         out = torch.nan_to_num(out, nan=0.0)
@@ -163,12 +159,8 @@ class Raindrop(pl.LightningModule):
             Sequential(Linear(in_D, hidden_D), BatchNorm1d(hidden_D), ReLU(),
                        Linear(hidden_D, hidden_D), ReLU()))
 
-        # Raindrop_v2's graph step: two chained Observation_progation layers.
-        # Layer 1 runs on the fixed adjacency (edge_weights below); layer 2
-        # runs on the edge weights layer 1 produced -- that hand-off is what
-        # makes the sensor graph adaptive rather than fixed, which is the
-        # thing that distinguishes "v2" from the plain-TransformerConv v1
-        # baseline this used to be.
+        # Raindrop_v2 graph step: layer 1 uses the fixed adjacency, layer 2 the
+        # edge weights from layer 1, so the sensor graph is adaptive.
         self.ob_propagation = Observation_progation(
             in_channels=max_len*self.dim, out_channels=max_len*self.dim,
             heads=1, n_nodes=d_inp, ob_dim=self.dim, dropout=dropout)
@@ -430,7 +422,7 @@ class Raindrop(pl.LightningModule):
     #                         'mask': mask
     #                     }
 
-    #                 # Calculate binary loss (keep as tensor for backprop!)
+    #                 # binary loss, kept as a tensor for backprop
     #                 if 'risk' not in self.option:
     #                     # binary_loss = self.loss_fn(
     #                     #     current_risk.unsqueeze(-1),
@@ -485,7 +477,7 @@ class Raindrop(pl.LightningModule):
     #                 })
     #                 # print("accuracy_next_weighted:", accuracy_next_weighted, "precision_next_weighted:", precision_next_weighted, "recall_next_weighted:", recall_next_weighted)
 
-    #             # Calculate weighted binary loss (keep as tensor!)
+    #             # weighted binary loss (tensor)
     #             if 'risk' not in self.option:
     #                 # binary_loss_weighted = sum(
     #                 #     r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -524,14 +516,8 @@ class Raindrop(pl.LightningModule):
     #     return output_dict
 
     def _calculate_weighted_c_index_by_infusion(self, y_pred, y_event, time_to_event, num_infusion, mode='train'):
-        """
-        Calculate weighted C-index stratified by infusion number.
-        Only includes infusions where C-index can be computed.
-
-        Returns:
-            dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                        auroc metrics, and optionally binary_loss (as tensor for backprop)
-        """
+        """Weighted C-index and next-infusion metrics stratified by infusion number,
+        skipping infusions where they can't be computed."""
         output_dict = {}
         num_infusion_tensor = torch.as_tensor(num_infusion, device=y_pred.device)
         y_event_tensor = torch.as_tensor(y_event, device=y_pred.device)
@@ -540,9 +526,7 @@ class Raindrop(pl.LightningModule):
         unique_infusions = torch.unique(num_infusion_tensor)
         risk_scores = y_pred.squeeze()
 
-        # ========================================================================
-        # Part 1: Risk prediction metrics (C-index)
-        # ========================================================================
+        # part 1: risk prediction metrics (C-index)
         if 'risk' in self.option:
             # First pass: identify valid infusions (has both events and censoring)
             valid_infusions = []
@@ -624,9 +608,7 @@ class Raindrop(pl.LightningModule):
                 'num_samples': total_samples,
                 'per_infusion': computable_results,
             })
-        # ========================================================================
-        # Part 2: Next-infusion side effect prediction (AUROC)
-        # ========================================================================
+        # part 2: next-infusion side effect prediction (AUROC)
 
         # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
         ### flattened tensors
@@ -699,7 +681,7 @@ class Raindrop(pl.LightningModule):
                             'mask': mask
                         }
 
-                    # Calculate binary loss (keep as tensor for backprop!)
+                    # binary loss, kept as a tensor for backprop
                     if 'risk' not in self.option:
                         binary_loss = all_sample_losses[mask].mean()
                         current_res['binary_loss'] = binary_loss  # Keep as tensor
@@ -745,7 +727,7 @@ class Raindrop(pl.LightningModule):
                         'per_infusion_auroc': computable_auroc_results
                     })
 
-                # Calculate weighted binary loss (keep as tensor!)
+                # weighted binary loss (tensor)
                 if 'risk' not in self.option:
                     binary_loss_weighted = torch.stack([
                         r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -787,18 +769,13 @@ class Raindrop(pl.LightningModule):
                 })
         # Add binary loss as tensor (for backprop) if in binary mode
         if 'risk' not in self.option and binary_loss_weighted is not None:
-            output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
+            output_dict['binary_loss'] = binary_loss_weighted  # tensor, not .item()
             output_dict['num_samples_next_infusion'] = num_samples_auroc
 
         return output_dict
 
     def forward(self, src, static, times, lengths, num_infusions=None):
-        """Input to the model:
-        src = P: [215, 128, 36] : 36 nodes, 128 samples, each sample each channel has a feature with 215-D vector
-        static = Pstatic: [128, 9]: this one doesn't matter; static features
-        times = Ptime: [215, 128]: the timestamps
-        lengths = lengths: [128]: the number of nonzero recordings.
-        """
+        """src: [B, T, 2*d_inp] (values, missingness), static: [B, d_static], times: [B, T], lengths: [B]."""
         # input shape (batch_size, seq_len, num_features) ->  [seq_len, batch_size, num_features]
         src = src.permute(1, 0, 2) # [seq_len, batch_size, num_features]
         times = times.permute(1, 0) # [seq_len, batch_size]
@@ -832,21 +809,16 @@ class Raindrop(pl.LightningModule):
             edge_index = torch.nonzero(adj).T
             edge_weights = adj[edge_index[0], edge_index[1]]
 
-            # graph message passing (Raindrop_v2: two chained
-            # Observation_progation hops, layer 2 using layer 1's own
-            # edge weights, so the sensor graph adapts between hops)
+            # graph message passing: two Observation_progation hops, layer 2 on layer 1's edge weights
             output = torch.zeros([maxlen, src.shape[1], self.d_inp*self.dim]).cuda()
             alpha_all = torch.zeros([edge_index.shape[1],  src.shape[1] ]).cuda()
 
-            # expand each sensor's scalar reading into self.dim ("d_ob")
-            # channels -- Raindrop_v2's per-sensor observation embedding
+            # expand each sensor's scalar reading into self.dim channels (d_ob)
             x_expanded = torch.repeat_interleave(x, self.dim, dim=-1)  # [maxlen, batch, d_inp*dim]
 
             for i, unit in enumerate(range(0, x.shape[1])):
                 stepdata = x_expanded[:, unit, :]  # [maxlen, d_inp*dim]
-                # give each of the d_inp sensor *nodes* its full time series
-                # (length maxlen*dim) as its node feature, instead of one
-                # scalar per node per call
+                # each sensor node gets its full time series (maxlen*dim) as its feature
                 stepdata = stepdata.reshape([maxlen, self.d_inp, self.dim]).permute(1, 0, 2)
                 stepdata = stepdata.reshape([self.d_inp, maxlen*self.dim])
 

@@ -21,26 +21,6 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
 import math
 from MSK_featurename_list import *
 
-def find_last_non_nan_timepoint(data):
-    """
-    Find the last timepoint where at least one feature value is non-NaN for each patient.
-
-    Parameters:
-    data (torch.Tensor): A 3D tensor with shape (num_patients, num_timepoints, num_features).
-
-    Returns:
-    torch.Tensor: A 1D tensor with the indices of the last timepoint with non-NaN values for each patient.
-    """
-    num_patients, num_timepoints, num_features = data.shape
-    last_non_nan_timepoints = torch.full((num_patients,), -1, dtype=torch.long)
-    
-    for patient_idx in range(num_patients):
-        for timepoint_idx in range(num_timepoints - 1, -1, -1):
-            if not torch.isnan(data[patient_idx, timepoint_idx]).all():
-                last_non_nan_timepoints[patient_idx] = timepoint_idx
-                break
-    
-    return last_non_nan_timepoints
 
 def nanstd(x): 
     return torch.sqrt(torch.nanmean((x - torch.nanmean(x))**2))
@@ -396,7 +376,7 @@ class lasttp_MLP(pl.LightningModule):
     #                     }
     #                     # print("current_res for infusion", infusion.item(), ":", current_res)
                         
-    #                 # Calculate binary loss (keep as tensor for backprop!)
+    #                 # binary loss, kept as a tensor for backprop
     #                 if 'risk' not in self.option:
     #                     # binary_loss = self.loss_fn(
     #                     #     current_risk.unsqueeze(-1),
@@ -451,7 +431,7 @@ class lasttp_MLP(pl.LightningModule):
     #                 })
     #                 # print("accuracy_next_weighted:", accuracy_next_weighted, "precision_next_weighted:", precision_next_weighted, "recall_next_weighted:", recall_next_weighted)
                 
-    #             # Calculate weighted binary loss (keep as tensor!)
+    #             # weighted binary loss (tensor)
     #             if 'risk' not in self.option:
     #                 binary_loss_weighted = torch.stack([
     #                     r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -486,14 +466,8 @@ class lasttp_MLP(pl.LightningModule):
     #     return output_dict
 
     def _calculate_weighted_c_index_by_infusion(self, y_pred, y_event, time_to_event, num_infusion, mode='train'):
-        """
-        Calculate weighted C-index stratified by infusion number.
-        Only includes infusions where C-index can be computed.
-
-        Returns:
-            dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                        auroc metrics, and optionally binary_loss (as tensor for backprop)
-        """
+        """Weighted C-index and next-infusion metrics stratified by infusion number,
+        skipping infusions where they can't be computed."""
         output_dict = {}
         num_infusion_tensor = torch.as_tensor(num_infusion, device=y_pred.device)
         y_event_tensor = torch.as_tensor(y_event, device=y_pred.device)
@@ -502,9 +476,7 @@ class lasttp_MLP(pl.LightningModule):
         unique_infusions = torch.unique(num_infusion_tensor)
         risk_scores = y_pred.squeeze()
 
-        # ========================================================================
-        # Part 1: Risk prediction metrics (C-index)
-        # ========================================================================
+        # part 1: risk prediction metrics (C-index)
         if 'risk' in self.option:
             # First pass: identify valid infusions (has both events and censoring)
             valid_infusions = []
@@ -586,9 +558,7 @@ class lasttp_MLP(pl.LightningModule):
                 'num_samples': total_samples,
                 'per_infusion': computable_results,
             })
-        # ========================================================================
-        # Part 2: Next-infusion side effect prediction (AUROC)
-        # ========================================================================
+        # part 2: next-infusion side effect prediction (AUROC)
 
         # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
         ### flattened tensors
@@ -661,7 +631,7 @@ class lasttp_MLP(pl.LightningModule):
                             'mask': mask
                         }
 
-                    # Calculate binary loss (keep as tensor for backprop!)
+                    # binary loss, kept as a tensor for backprop
                     if 'risk' not in self.option:
                         binary_loss = all_sample_losses[mask].mean()
                         current_res['binary_loss'] = binary_loss  # Keep as tensor
@@ -707,7 +677,7 @@ class lasttp_MLP(pl.LightningModule):
                         'per_infusion_auroc': computable_auroc_results
                     })
 
-                # Calculate weighted binary loss (keep as tensor!)
+                # weighted binary loss (tensor)
                 if 'risk' not in self.option:
                     binary_loss_weighted = torch.stack([
                         r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -749,7 +719,7 @@ class lasttp_MLP(pl.LightningModule):
                 })
         # Add binary loss as tensor (for backprop) if in binary mode
         if 'risk' not in self.option and binary_loss_weighted is not None:
-            output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
+            output_dict['binary_loss'] = binary_loss_weighted  # tensor, not .item()
             output_dict['num_samples_next_infusion'] = num_samples_auroc
 
         return output_dict

@@ -161,7 +161,6 @@ class PerModuleTokenizer(nn.Module):
         return token
 
 
-
 class MissingnessAwareAttentionAggregation(nn.Module):
     """Gated attention pooling over time, combined with the masked mean and std."""
     def __init__(self, d_model, reduction_ratio=4, max_time_len=20):
@@ -234,24 +233,9 @@ class MissingnessAwareAttentionAggregation(nn.Module):
         return z_aggregated
 
 
-
-
 def nanstd(x):
     return torch.sqrt(torch.nanmean((x - torch.nanmean(x))**2))
 
-def symmetrical_loss_calc(preds, gt, loss_fn, option = 'pairwise_logistic'):
-    pos = preds[gt == 1]
-    neg = preds[gt == 0]
-
-    # pairwise differences z_ij = s_pos_i - s_neg_j, shape (P, Q)
-    z = pos.unsqueeze(1) - neg.unsqueeze(0)   # shape (P, Q)
-
-    if option == 'pairwise_barrier':
-        loss_matrix = loss_fn.barrier_hinge_loss(z)   # element-wise
-    elif option == 'pairwise_logistic':
-        loss_matrix = F.softplus(-z)   # element-wise logistic loss
-    auc_loss = loss_matrix.mean()                 # aggregate over pairs
-    return auc_loss
 
 class SPARC(pl.LightningModule):
     def __init__(self,

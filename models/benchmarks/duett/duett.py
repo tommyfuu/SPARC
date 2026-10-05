@@ -1,39 +1,7 @@
 """
-DuETT benchmark -- standalone LightningModule.
-
-Wraps DuETTEncoder (duett_model.py), which implements the architecture from
-Labach et al., "DuETT: Dual Event Time Transformer for Electronic Health
-Records" (MLHC 2023): per-variable tokens, continuous value embeddings, and
-alternating event-axis / time-axis attention with a learned representation
-token.
-
-This module is self-contained -- it does not import or subclass the SPARC
-classes. It implements the same interface the other benchmarks expose
-(lasttp_MLP, rnn, raindrop) so the training and evaluation scripts can use it
-interchangeably:
-
-    __init__(modular_featuredim_dict, option=..., max_time_len=..., lr=...,
-             weight_decay=..., num_encoder_layers=..., dropout=...,
-             side_effects_num_infusion=...)
-    data_prep(batch) -> xs, y, src_key_padding_mask, num_infusion, DMP_ID
-    forward(src, src_key_padding_mask=..., num_infusion=...)
-    training_step / validation_step / test_step / configure_optimizers
-
-It logs 'val_loss', which is what the trainer's ModelCheckpoint and
-EarlyStopping monitor.
-
-Supported `option` values:
-    binary, binary_icu_pre   -> BCE on a single label
-    side_effects             -> BCE, metrics stratified by infusion number
-    side_effects_risk        -> Cox partial likelihood, c-index + next-infusion
-                                AUROC stratified by infusion number
-
-data_prep builds the feature row the encoder expects:
-
-    [ values (static | per-module mean,count | time) | missingness | padding ]
-
-which is 2*(2*ts + nts + 1) + 1 wide -- the same width the loader's duett path
-produces, so no changes to data_loaders_inf_risk_fixed.py are needed.
+DuETT benchmark (Labach et al., MLHC 2023) as a standalone LightningModule wrapping
+DuETTEncoder, with the same interface as the other benchmarks (lasttp_MLP, rnn, raindrop).
+Supports option = binary, binary_icu_pre, side_effects, side_effects_risk (Cox loss).
 """
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
@@ -72,17 +40,11 @@ class DuETT(pl.LightningModule):
         self.weight_decay = weight_decay
         self.modular_featuredim_dict = modular_featuredim_dict
         self.side_effects_num_infusion = side_effects_num_infusion
-        # Accepted for parity with the other benchmarks, which use it to gate
-        # per-infusion-group logging. DuETT logs only the aggregate metrics, so
-        # there is nothing here for it to switch off.
+        # accepted for parity with the other benchmarks; DuETT logs only aggregates
         self.test_metrics_by_infusion_group = test_metrics_by_infusion_group
 
-        # The paper's token width. d_model is kept in the signature because the
-        # other benchmarks take it, but the transformer runs at d_embedding: with
-        # one token per (bin, variable) there are ~370x more tokens than the flat
-        # encoder sees, so a 512-wide token is both slower and larger than the
-        # architecture it replaces. 64 measured faster than the SPARC variant
-        # (112 ms vs 127 ms/batch, 7.5 GiB vs 18.8 GiB at batch 512).
+        # paper's token width; d_model is accepted for interface parity but unused.
+        # One token per (bin, variable) makes 512-wide tokens too slow/large.
         d_embedding = d_embedding or 64
         # nhead must divide d_embedding
         while d_embedding % nhead != 0 and nhead > 1:
@@ -114,7 +76,7 @@ class DuETT(pl.LightningModule):
         if 'risk' in option:
             self.c_index = ConcordanceIndex()
 
-    # ------------------------------------------------------------------ data
+    # data
     def data_prep(self, data):
         """Unpack a batch and build the encoder's input row."""
         if self.side_effects_num_infusion:
@@ -143,7 +105,7 @@ class DuETT(pl.LightningModule):
         xs = torch.cat([xs, padding_indicator], dim=-1)
         return xs, y, src_key_padding_mask, num_infusion, DMP_ID
 
-    # --------------------------------------------------------------- forward
+    # forward
     def forward(self, src, src_key_padding_mask=None, num_infusion=None):
         z = self.encoder(src, src_key_padding_mask=src_key_padding_mask)
         z = self.head(z)
@@ -155,14 +117,10 @@ class DuETT(pl.LightningModule):
             z = torch.sigmoid(z)
         return z
 
-    # --------------------------------------------------- per-infusion metrics
+    # per-infusion metrics
     def _metrics_by_infusion(self, y_pred, y_event, time_to_event, num_infusion):
-        """Weighted c-index and next-infusion AUROC, stratified by infusion no.
-
-        Mirrors the aggregation the other benchmarks use: metrics are computed
-        within each infusion-number group and averaged weighted by group size,
-        skipping groups where the metric is undefined.
-        """
+        """Weighted c-index and next-infusion AUROC, averaged over infusion-number
+        groups weighted by size; groups with an undefined metric are skipped."""
         out = {}
         risk = y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred
         ev = torch.as_tensor(y_event, device=risk.device).float()
@@ -209,7 +167,7 @@ class DuETT(pl.LightningModule):
                 pass
         return out
 
-    # ----------------------------------------------------------------- steps
+    # steps
     def _shared_step(self, batch, stage):
         xs, y, pad, num_infusion, _ = self.data_prep(batch)
         y_pred = self(xs, src_key_padding_mask=pad, num_infusion=num_infusion)

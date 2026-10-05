@@ -142,14 +142,8 @@ def nanstd(x):
 #     return neg_log_likelihood
 
 def deephit_log_likelihood_loss_single_risk(predictions, time_to_events, fail_indicators):
-    """
-    DeepHit loss for single risk (no competing risks)
-    
-    Args:
-        predictions: [batch_size, num_Category] - PMF over time bins
-        time_to_events: [batch_size] - which time bin event/censoring occurred
-        fail_indicators: [batch_size] - 1 if event, 0 if censored
-    """
+    """DeepHit loss for a single risk. predictions: [B, num_Category] PMF over time bins;
+    time_to_events: [B] raw times (binned into 4 categories); fail_indicators: [B] 1 if event, 0 if censored."""
     batch_size = predictions.shape[0]
     num_categories = 4
     
@@ -173,9 +167,7 @@ def deephit_log_likelihood_loss_single_risk(predictions, time_to_events, fail_in
     event_mask = fail_indicators.float().unsqueeze(1)  # [batch, 1]
     censor_mask = (1.0 - fail_indicators.float()).unsqueeze(1)  # [batch, 1]
     
-    # -------------------------------------------------------------------------
-    # PART 1: Log-likelihood for OBSERVED EVENTS
-    # -------------------------------------------------------------------------
+    # log-likelihood for observed events
     
     # Probability at actual event time
     prob_at_event = torch.sum(predictions * categories, dim=1, keepdim=True)  # [batch, 1]
@@ -183,9 +175,7 @@ def deephit_log_likelihood_loss_single_risk(predictions, time_to_events, fail_in
     # Log-likelihood for events (only for uncensored patients)
     ll_events = event_mask * torch.log(prob_at_event + 1e-8)
     
-    # -------------------------------------------------------------------------
-    # PART 2: Log-likelihood for CENSORED PATIENTS
-    # -------------------------------------------------------------------------
+    # log-likelihood for censored patients
     
     # Total probability mass (should be ≤ 1)
     total_prob = torch.sum(predictions, dim=1, keepdim=True)  # [batch, 1]
@@ -196,9 +186,7 @@ def deephit_log_likelihood_loss_single_risk(predictions, time_to_events, fail_in
     # Log-likelihood for censored (only for censored patients)
     ll_censored = censor_mask * torch.log(survival_prob + 1e-8)
     
-    # -------------------------------------------------------------------------
-    # PART 3: Combine
-    # -------------------------------------------------------------------------
+    # combine
     
     total_ll = ll_events + ll_censored
     neg_log_likelihood = -torch.mean(total_ll)
@@ -619,7 +607,7 @@ class RNN(pl.LightningModule):
     #                         'mask': mask
     #                     }
                         
-    #                 # Calculate binary loss (keep as tensor for backprop!)
+    #                 # binary loss, kept as a tensor for backprop
     #                 if 'risk' not in self.option:
     #                     # binary_loss = self.loss_fn(
     #                     #     current_risk.unsqueeze(-1),
@@ -674,7 +662,7 @@ class RNN(pl.LightningModule):
     #                 })
     #                 # print("accuracy_next_weighted:", accuracy_next_weighted, "precision_next_weighted:", precision_next_weighted, "recall_next_weighted:", recall_next_weighted)
                 
-    #             # Calculate weighted binary loss (keep as tensor!)
+    #             # weighted binary loss (tensor)
     #             if 'risk' not in self.option:
     #                 # binary_loss_weighted = sum(
     #                 #     r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -713,14 +701,8 @@ class RNN(pl.LightningModule):
     #     return output_dict
 
     def _calculate_weighted_c_index_by_infusion(self, y_pred, y_event, time_to_event, num_infusion, mode='train'):
-        """
-        Calculate weighted C-index stratified by infusion number.
-        Only includes infusions where C-index can be computed.
-
-        Returns:
-            dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                        auroc metrics, and optionally binary_loss (as tensor for backprop)
-        """
+        """Weighted C-index and next-infusion metrics stratified by infusion number,
+        skipping infusions where they can't be computed."""
         output_dict = {}
         num_infusion_tensor = torch.as_tensor(num_infusion, device=y_pred.device)
         y_event_tensor = torch.as_tensor(y_event, device=y_pred.device)
@@ -729,9 +711,7 @@ class RNN(pl.LightningModule):
         unique_infusions = torch.unique(num_infusion_tensor)
         risk_scores = y_pred.squeeze()
 
-        # ========================================================================
-        # Part 1: Risk prediction metrics (C-index)
-        # ========================================================================
+        # part 1: risk prediction metrics (C-index)
         if 'risk' in self.option:
             # First pass: identify valid infusions (has both events and censoring)
             valid_infusions = []
@@ -813,9 +793,7 @@ class RNN(pl.LightningModule):
                 'num_samples': total_samples,
                 'per_infusion': computable_results,
             })
-        # ========================================================================
-        # Part 2: Next-infusion side effect prediction (AUROC)
-        # ========================================================================
+        # part 2: next-infusion side effect prediction (AUROC)
 
         # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
         ### flattened tensors
@@ -888,7 +866,7 @@ class RNN(pl.LightningModule):
                             'mask': mask
                         }
 
-                    # Calculate binary loss (keep as tensor for backprop!)
+                    # binary loss, kept as a tensor for backprop
                     if 'risk' not in self.option:
                         binary_loss = all_sample_losses[mask].mean()
                         current_res['binary_loss'] = binary_loss  # Keep as tensor
@@ -934,7 +912,7 @@ class RNN(pl.LightningModule):
                         'per_infusion_auroc': computable_auroc_results
                     })
 
-                # Calculate weighted binary loss (keep as tensor!)
+                # weighted binary loss (tensor)
                 if 'risk' not in self.option:
                     binary_loss_weighted = torch.stack([
                         r['binary_loss'] * r['num_samples'] / total_samples_auroc
@@ -976,7 +954,7 @@ class RNN(pl.LightningModule):
                 })
         # Add binary loss as tensor (for backprop) if in binary mode
         if 'risk' not in self.option and binary_loss_weighted is not None:
-            output_dict['binary_loss'] = binary_loss_weighted  # TENSOR, not .item()!
+            output_dict['binary_loss'] = binary_loss_weighted  # tensor, not .item()
             output_dict['num_samples_next_infusion'] = num_samples_auroc
 
         return output_dict

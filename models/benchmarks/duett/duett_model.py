@@ -1,34 +1,7 @@
 """
-DuETT encoder -- faithful to Labach et al., "DuETT: Dual Event Time Transformer
-for Electronic Health Records" (MLHC 2023), github.com/layer6ai-labs/duett.
-
-This is the architecture only; the LightningModule that wraps it lives in
-duett.py. Written standalone rather than as a variant of the SPARC encoder.
-
-What the paper specifies, and what is implemented here:
-
-  * Per-variable tokens. Each (time bin, clinical variable) pair becomes one
-    token, so the tensor is (batch, time, vars, d_embedding) rather than a flat
-    (batch, time, features) matrix.
-  * Continuous value embedding (CVE). Scalars are embedded by
-    Linear(1 -> sqrt(d)) -> Tanh -> [BatchNorm] -> Linear(sqrt(d) -> d), used
-    separately for the binned value, the observation count, and the bin time.
-  * Dual attention. Each layer attends first over the variable axis (the "event"
-    transformer) and then over the time axis, alternating for n_layers.
-  * A learned representation token, read out for the prediction head.
-
-Input contract. The loader's duett path (_process_duett_model in
-data/data_loaders_inf_risk_fixed.py) bins each patient into max_time_len bins
-and emits, per bin and per module, the per-feature means followed by the
-per-feature observation counts -- which is the (values, counts) pair the paper
-expects. data_prep in the wrapper reassembles that into:
-
-    [ static(nts) | m1_mean(f1) m1_count(f1) | m2_mean(f2) ... | time ]   values
-    [ ................ same width ................................. ]   missingness
-    [ padding_indicator ]
-
-so the column ranges are derivable from modular_featuredim_dict and the module
-order. split_features() below does that reconstruction.
+DuETT encoder (Labach et al., MLHC 2023; github.com/layer6ai-labs/duett): per-variable tokens,
+continuous value embeddings and alternating event/time attention. The LightningModule is in duett.py;
+split_features() recovers the [static | per-module means, counts | time] column layout built by data_prep.
 """
 
 import numpy as np
@@ -36,10 +9,8 @@ import torch
 import torch.nn as nn
 
 
-# The loader writes the time-series modules in exactly this order -- see
-# fetch_data_given_dates in data/data_loaders_inf_risk_fixed.py. The column
-# layout below has to follow that order, not modular_featuredim_dict's key
-# order, which is set independently by load_dataset.
+# order in which the loader writes the time-series modules (fetch_data_given_dates in
+# data/data_loaders_inf_risk_fixed.py); the column layout follows this, not modular_featuredim_dict
 TS_MODULES = ('basic_lab', 'extra_lab', 'cbc_differential', 'basic_vitals',
               'extra_vitals')
 
@@ -57,11 +28,7 @@ class BatchNormLastDim(nn.Module):
 
 
 class CVE(nn.Module):
-    """Continuous value embedding: a scalar to a d_embedding vector.
-
-    Linear(1 -> sqrt(d)) -> Tanh -> [BatchNorm] -> Linear(sqrt(d) -> d), the
-    structure used in the reference implementation.
-    """
+    """Continuous value embedding: Linear(1 -> sqrt(d)) -> Tanh -> [BatchNorm] -> Linear(sqrt(d) -> d)."""
 
     def __init__(self, d_embedding, batch_norm=True):
         super().__init__()
@@ -77,12 +44,8 @@ class CVE(nn.Module):
 
 
 def variable_layout(modular_featuredim_dict, missing_mask=True):
-    """Column ranges for the flat row data_prep produces.
-
-    Returns (n_static, ts_slices, n_values, total_width) where ts_slices is a
-    list of (mean_slice, count_slice) index ranges, one pair per time-series
-    feature, into the *values* half of the row.
-    """
+    """Column ranges for the flat row data_prep produces: (n_static, ts_slices, n_values, total_width),
+        with one (mean_slice, count_slice) pair per time-series feature."""
     nts_keys = [k for k in modular_featuredim_dict if k not in TS_MODULES]
     ts_keys = [k for k in TS_MODULES if k in modular_featuredim_dict]
     n_static = sum(modular_featuredim_dict[k] for k in nts_keys)
@@ -123,7 +86,7 @@ class DuETTEncoder(nn.Module):
         # plus the learned representation token
         self.n_tokens = self.n_ts_vars + 1 + 1
 
-        # --- embeddings -----------------------------------------------------
+        # embeddings
         self.value_cve = CVE(d_embedding, batch_norm)
         self.count_cve = CVE(d_embedding, batch_norm)
         self.time_cve = CVE(d_embedding, batch_norm)
@@ -134,7 +97,7 @@ class DuETTEncoder(nn.Module):
             nn.Linear(self.n_static, d_embedding) if self.n_static > 0 else None)
         self.rep_token = nn.Parameter(torch.randn(d_embedding) * 0.02)
 
-        # --- dual-axis transformer stacks -----------------------------------
+        # dual-axis transformer stacks
         def _encoder_layer():
             return nn.TransformerEncoderLayer(
                 d_model=d_embedding, nhead=nhead, dim_feedforward=dim_feedforward,
@@ -144,7 +107,6 @@ class DuETTEncoder(nn.Module):
         self.time_layers = nn.ModuleList([_encoder_layer() for _ in range(n_layers)])
         self.norm = nn.LayerNorm(d_embedding)
 
-    # ------------------------------------------------------------------ utils
     def split_features(self, src):
         """(B, T, total) -> values (B, T, n_values), indicators, padding."""
         values = src[..., :self.n_values]
@@ -189,7 +151,6 @@ class DuETTEncoder(nn.Module):
         time_col = values[..., -1]                     # (B, T)
         return tokens, self.time_cve(time_col)
 
-    # ---------------------------------------------------------------- forward
     def forward(self, src, src_key_padding_mask=None):
         """src (B, T, total_feature_dim) -> representation (B, d_embedding)."""
         tokens, time_embedding = self.build_tokens(src)

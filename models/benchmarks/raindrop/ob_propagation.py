@@ -1,22 +1,6 @@
-"""
-Ported from the official Raindrop_v2 implementation:
-mims-harvard/Raindrop, code/Ob_propagation.py
+"""Raindrop_v2 observation-propagation layer, ported from mims-harvard/Raindrop code/Ob_propagation.py.
 
-This is the message-passing layer that makes a model "Raindrop_v2" rather
-than the simpler "Raindrop" (v1) baseline: Raindrop_v2 calls this layer
-twice per sample, feeding layer 1's output edge weights in as layer 2's
-edge weights, so the sensor graph is refined between the two hops. That
-chaining happens in the caller's forward(), not in this file.
-
-NOTE: the official file defines two message-computing methods -- a content
-based `message_selfattention` (query/key dot-product) that is never called,
-and the `message` method actually invoked by PyG's MessagePassing.propagate().
-The real Raindrop_v2 forward() also always calls with use_beta=False, which
-skips the beta/edge-pruning logic entirely. This port keeps only the code
-path that is actually executed, so this is behaviorally identical to the
-official Raindrop_v2, not a re-derivation of it. If you want byte-for-byte
-source parity (including the dead code), the original file is at the path
-above.
+Keeps only the executed path (`message`, use_beta=False); the unused message_selfattention and beta pruning are dropped.
 """
 from typing import Union, Tuple, Optional
 
@@ -29,8 +13,7 @@ from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.utils import softmax
 
 try:
-    # Present in modern torch_geometric; avoids a hard dependency on the
-    # separate torch_scatter package.
+    # avoids depending on torch_scatter
     from torch_geometric.utils import scatter as pyg_scatter
 except ImportError:  # pragma: no cover
     from torch_scatter import scatter as pyg_scatter
@@ -58,9 +41,7 @@ class Observation_progation(MessagePassing):
         if isinstance(in_channels, int):
             in_channels = (in_channels, in_channels)
 
-        # Only lin_value is needed: the actually-invoked `message()` below
-        # does not use lin_key/lin_query (those back the unused
-        # message_selfattention path in the original file).
+        # message() only uses lin_value
         self.lin_value = Linear(in_channels[0], heads * out_channels, bias=bias)
 
         self.reset_parameters()
@@ -75,8 +56,7 @@ class Observation_progation(MessagePassing):
             return_attention_weights (bool, optional): If set to :obj:`True`,
                 will additionally return the tuple
                 :obj:`(edge_index, attention_weights)`, holding the edge
-                weights that were used for each edge (which is what the
-                caller feeds in as `edge_weights` for the *next* layer).
+                weights used for each edge (fed to the next layer as `edge_weights`).
         """
         if isinstance(x, Tensor):
             x: PairTensor = (x, x)
@@ -99,11 +79,8 @@ class Observation_progation(MessagePassing):
     def message(self, x_i: Tensor, x_j: Tensor, edge_weights: Tensor,
                 edge_attr: OptTensor, index: Tensor, ptr: OptTensor,
                 size_i: Optional[int]) -> Tensor:
-        # Matches the official Raindrop_v2 code path exactly: the edge
-        # weight passed in *is* the attention value (no learned query/key
-        # score here) -- for layer 1 that's the fixed/complete adjacency,
-        # for layer 2 it's layer 1's own (softmax-normalized) alpha, which
-        # is the adaptive-structure mechanism that defines Raindrop_v2.
+        # the incoming edge weight is the attention value: fixed adjacency in layer 1,
+        # layer 1's alpha in layer 2
         if edge_weights is not None:
             gamma = edge_weights.unsqueeze(-1)
         else:
@@ -113,7 +90,7 @@ class Observation_progation(MessagePassing):
         gamma = softmax(gamma, index, ptr, size_i)
         gamma = F.dropout(gamma, p=self.dropout, training=self.training)
 
-        # NOTE: uses x_i, not x_j -- this matches the official file as-is.
+        # uses x_i, not x_j, as in the official code
         out = F.relu(self.lin_value(x_i)).view(-1, self.heads, self.out_channels)
         out = out * gamma.view(-1, self.heads, 1)
         return out
