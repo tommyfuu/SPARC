@@ -1,14 +1,9 @@
 """Directly-trained vs pretrained-then-finetuned SPARC across training-set sizes.
 
-Fractions: 1/1, 1/4, 1/16, 1/64, 1/128, 1/256, plus 1/32 which exists only for
-binary_icu_pre. Every model is scored on the complete test set; the extreme
-fractions are missing for some tasks and are skipped rather than failing.
+Fractions 1/1 to 1/256 (1/32 only for binary_icu_pre), all scored on the full test set;
+missing fractions are skipped.
 
-Tasks: AKI_risk, febrile_neutropenia_risk, neutropenia_risk, anemia_risk,
-Liver_toxicity_risk, binary, binary_icu_pre.
-
-Usage:
-    python3 eval_4_titration_compare_all_fractions.py -o AKI_risk
+Usage: python3 eval_4_titration_compare_all_fractions.py -o AKI_risk
 """
 
 import os
@@ -40,9 +35,8 @@ import sparc_paths
 
 from data_loaders_inf_risk_fixed import FlexibleFeatureDataModule
 from dataset_loading import load_dataset
-from SPARC_inf_risk_modular import *  # Use the 060726 version with modular tokenization
-from MSK_featurename_list import build_module_index_config  # For module tokenizer config
-# from eval_utils import calculate_weighted_c_index_by_infusion
+from SPARC_inf_risk_modular import *
+from MSK_featurename_list import build_module_index_config
 
 
 from torchsurv.metrics.cindex import ConcordanceIndex
@@ -61,7 +55,7 @@ auprc = AveragePrecision(task='binary')
 from eval_utils import calculate_weighted_c_index_by_infusion
 from torchmetrics import AUROC, AveragePrecision
 
-# Argument parsing
+# Arguments
 import argparse
 
 parser = argparse.ArgumentParser(
@@ -73,6 +67,20 @@ parser.add_argument("-o",  "--option",  type=str,  default='AKI_risk',
 parser.add_argument("-ds", "--dataset", type=str,  default='MSK_CAIA')
 parser.add_argument("-m",  "--modules", type=str,  default='parsimonious')
 parser.add_argument("-r",  "--rseed",   type=int,  default=1024)
+parser.add_argument("-mp", "--model_base_path", type=str, default=None,
+                    help='root holding the FULL-DATA (1/1) models, i.e. the dir containing '
+                         'SPARC_direct_models/ and SPARC_finetuned_models/. '
+                         'Default: <SPARC_MODEL_ROOT>/parsimonious_MSK_CAIA_060726')
+parser.add_argument("-tr", "--trainsize_base_path", type=str,
+                    default='/data1/morrisq/fuc/SPARC_CAIA_titration_092426/parsimonious_MSK_CAIA_060726',
+                    help='root holding the TRAINSIZE models, i.e. the dir containing '
+                         'SPARC_direct_models_trainsize/. Defaults to the bf=True titration tree. '
+                         'The titration run lives in a separate root, so these differ.')
+parser.add_argument("-rp", "--results_path", type=str, default=None,
+                    help='where to write the CSV. Default: sparc_paths.SPARC_TITRATION_RESULTS_DIR')
+parser.add_argument("-bf", "--batch_first", type=str, default='True',
+                    help='True | False -- build SPARC with batch_first=True. MUST match how the '
+                         'checkpoints were trained; a mismatch loads silently and costs 4-8 AUROC points.')
 parser.add_argument("-cp", "--caia_portion", type=str, default='prior',
                     help="prior | post | entire — which slice of MSK_CAIA to load "
                          "(wrt 2021). MUST match eval_1 (default 'prior'); omitting it "
@@ -86,8 +94,7 @@ modules = args.modules
 rseed   = args.rseed
 caia_portion = args.caia_portion.lower()
 
-# Define all fractions to test
-# Standard fractions: full data + trainsize ablations
+# Training-set fractions
 STANDARD_FRACTIONS = ['1/1', '1/4', '1/16', '1/64', '1/128', '1/256']
 
 # 1/32 only exists for binary_icu_pre
@@ -115,7 +122,7 @@ TASK_MED_MAP = {
     'binary_icu_pre':             ("CISPLATIN", False),
 }
 
-# Maps task name → subfolder name (updated for 060726 structure)
+# task -> model subfolder name
 TASK_PATH_NAME = {
     'AKI_risk':                 'risk_AKI',
     'febrile_neutropenia_risk': 'hybrid_febrile_neutropenia',
@@ -132,7 +139,7 @@ if option not in TASK_MED_MAP:
 med_str, add_num_infusion = TASK_MED_MAP[option]
 is_binary_task = option in ('binary', 'binary_icu_pre')
 
-# Parse med string into list-of-lists (handles '+' combinations)
+# med string -> list of lists ('+' joins a regimen)
 med_of_choice = []
 for m in med_str.split(','):
     m = m.strip()
@@ -143,16 +150,21 @@ for m in med_str.split(','):
 
 days = 30 if option == 'binary_icu_pre' else 180
 
-# Paths (updated for 060726 structure)
+# Paths
 data_source_path = sparc_paths.DATA_ROOT + '/'
-base_model_path  = sparc_paths.SPARC_MODEL_ROOT + '/parsimonious_MSK_CAIA_060726'
+base_model_path  = args.model_base_path or (sparc_paths.SPARC_MODEL_ROOT + '/parsimonious_MSK_CAIA_060726')
+# titration models live in their own root, separate from the 1/1 models
+trainsize_base_path = args.trainsize_base_path or base_model_path
+print(f"[paths] full-data (1/1) root : {base_model_path}")
+print(f"[paths] trainsize root       : {trainsize_base_path}")
 task_folder_name = TASK_PATH_NAME[option]
 
-save_dir  = sparc_paths.SPARC_MODEL_ROOT + '/results_vis_060726/eval_trainsize'
+save_dir  = args.results_path or sparc_paths.SPARC_TITRATION_RESULTS_DIR
+print(f"[paths] results              : {save_dir}")
 os.makedirs(save_dir, exist_ok=True)
 save_name = f'{save_dir}/trainsize_comparison_{option}_{dataset}_all_fractions.csv'
 
-# Load dataset (full test set — no sample fraction or bundle missingness)
+# Load dataset (full test set)
 print(f"\nLoading dataset: task={option}  dataset={dataset} ...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
@@ -170,21 +182,17 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 )
 print("modular_featuredim_dict:", modular_featuredim_dict)
 
-# 060726 Model Configuration (modular tokenization, continuous time, etc.)
-use_module_tokenizer = True   # -umt True: per-clinical-module tokenization
-use_continuous_time = True    # -uct True: learned continuous-time embedding
-post_mlp_dropout = 0.2        # -pmd 0.2: dropout for post-transformer MLP
+# Model config; must match training and eval_1
+use_module_tokenizer = True   # -umt True
+use_continuous_time = True    # -uct True
+post_mlp_dropout = 0.2        # -pmd 0.2
+use_sigmoid = True            # probabilities, not logits
+missing_mask = True
+schedule_option = 'default'
+include_gcsf = False
+learning_rate = 1e-4
 
-# Additional load-time params to match eval_1 (the correct reference script).
-# These must match the training configuration for the 060726 models, otherwise
-# the model receives differently-composed inputs / outputs than at train time.
-use_sigmoid = True            # True for test/eval mode (probabilities, not logits)
-missing_mask = True           # Concatenate missingness indicators as extra features
-schedule_option = 'default'   # Default AdamW scheduler
-include_gcsf = False          # No GCSF channel
-learning_rate = 1e-4          # Default learning rate
-
-# Build per-module tokenizer config (required when use_module_tokenizer=True)
+# Per-module tokenizer config
 n_static_features = 0
 if use_module_tokenizer:
     module_index_cfg = build_module_index_config(
@@ -195,12 +203,11 @@ if use_module_tokenizer:
 else:
     module_index_cfg = None
 
-# Build test split
+# Test split
 key_module = 'basic_lab' if 'basic_lab' in data_dict_lab_dict else 'age'
 
 if dataset == 'MSK_CAIA':
-    testDMP_IDs = split_dict['test']          # use load_dataset's list as-is, like eval_1
-    # do NOT rebuild split_dict / do NOT filter on basic_lab membership
+    testDMP_IDs = split_dict['test']          # as-is, like eval_1 (no basic_lab filter)
 
 elif dataset == 'MSK':
     with open(f'{data_source_path}/MSK/fold_dict_11.pickle', 'rb') as f:
@@ -214,25 +221,18 @@ else:
 # Data module
 model_set_option = 'binary' if is_binary_task else 'side_effects_risk'
 
-# Determine loss_option for the data module / metric routing (hybrid vs pure risk/Cox)
-# hybrid tasks: febrile_neutropenia, neutropenia, anemia (use hybrid loss = Cox + BCE)
-# risk tasks: AKI, Liver_toxicity (use pure Cox loss)
+# hybrid (Cox + BCE) for FN/neutropenia/anemia, Cox only for AKI/LT
 if task_folder_name.startswith('hybrid_'):
     loss_option = 'hybrid'
 else:
-    loss_option = 'default'  # Pure risk/Cox loss
+    loss_option = 'default'
 print(f"Task: {option}, loss_option: {loss_option}, model_set_option: {model_set_option}")
 
-# NOTE: eval_1 (the correct reference) loads the SPARC checkpoint with
-# loss_option='default' for ALL side-effect tasks, including the hybrid ones.
-# loss_option only affects the training loss, not the eval forward pass, so the
-# load-time value must match eval_1 to reproduce its numbers exactly.
+# eval_1 loads every checkpoint with loss_option='default' (it only affects the training loss)
 load_loss_option = 'default'
 
-# anc flag MUST match eval_1: CAIA datasets store absolute neutrophil counts
-# (K/µL) and require anc=True; other datasets use raw percentages (anc=False).
-# Omitting this lets it default to False, which mis-scales the neutrophil
-# feature at inference and corrupts the SPARC/SPARC-P risk metrics.
+# CAIA stores absolute neutrophil counts and needs anc=True (as in eval_1); otherwise the
+# neutrophil feature is mis-scaled
 anc_mode = True if 'CAIA' in dataset else False
 
 data_module = FlexibleFeatureDataModule(
@@ -242,16 +242,13 @@ data_module = FlexibleFeatureDataModule(
     med_as_feature=False, med_l=med_of_choice,
     advanced_model='default', control_lack_confounds=False,
     side_effect_censoring=False,
-    include_infusion_dates=add_num_infusion,  # add_num_infusion is already False for binary tasks
+    include_infusion_dates=add_num_infusion,  # False for binary tasks
     premed_only=False, competing_risk_death_check=False,
     anc=anc_mode,
 )
 print(f"Data module ready — test patients: {len(testDMP_IDs)}  (anc={anc_mode})")
 
-# Diagnostic: hash the sorted test-patient IDs so this can be compared directly
-# against eval_1. If the hashes match, the two scripts evaluate the identical
-# cohort and any residual metric gap is downstream of data loading. If they
-# differ, the data load (e.g. caia_portion) is the cause.
+# hash of the test IDs, to check the cohort matches eval_1
 import hashlib
 _id_hash = hashlib.md5(
     ','.join(map(str, sorted(map(str, testDMP_IDs)))).encode()
@@ -259,8 +256,8 @@ _id_hash = hashlib.md5(
 print(f"TEST COHORT FINGERPRINT: n={len(testDMP_IDs)}  md5={_id_hash}  "
       f"caia_portion={caia_portion}")
 
-# Load existing results (resume-safe)
-model_performance_dict = {}  # Structure: {model_name: {fraction: {fold: metrics}}}
+# Resume from existing results
+model_performance_dict = {}  # {model_name: {fraction: {fold: metrics}}}
 if os.path.exists(save_name):
     print(f"\nResuming from existing results: {save_name}")
     saved_df = pd.read_csv(save_name)
@@ -292,7 +289,7 @@ if os.path.exists(save_name):
                 'test_auroc_nextinf_weighted':row.get('test_auroc_nextinf_weighted'),
             }
 
-# Helper: save current results to CSV
+# Save results to CSV
 ALL_COLUMNS = ['model', 'training_method', 'data_fraction', 'val_fold',
                'test_cindex_overall_valid', 'test_cindex_weighted',
                'test_auroc_nextinf_overall', 'test_auroc_nextinf_weighted',
@@ -315,7 +312,7 @@ def _save_results():
     pd.DataFrame(rows, columns=ALL_COLUMNS).to_csv(save_name, index=False)
     print(f"  Saved → {save_name}")
 
-# Evaluation loop: iterate over all fractions
+# Evaluate each fraction
 device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 auroc_fn = AUROC(task='binary')
 auprc_fn = AveragePrecision(task='binary')
@@ -327,9 +324,8 @@ for data_fraction in ALL_FRACTIONS:
     print(f"# DATA FRACTION: {data_fraction}")
     print(f"{'#'*80}")
 
-    # Special handling for full data (1/1) - different directory structure
+    # 1/1 models are in the non-trainsize directories
     if data_fraction == '1/1':
-        # Full data models are in the non-trainsize directories
         direct_model_path = (
             f'{base_model_path}/SPARC_direct_models/'
             f'parsimonious_direct_models_{task_folder_name}_20tp_topchemos_att_modular'
@@ -339,18 +335,16 @@ for data_fraction in ALL_FRACTIONS:
             f'parsimonious_finetuned_models_{task_folder_name}_20tp_topchemos_att_modular'
         )
     else:
-        # Trainsize fractions use trainsize directories
-        # Convert fraction format: 1/4 → 1over4
+        # 1/4 -> 1over4
         frac_denom = data_fraction.split('/')[1]
         frac_tag   = f'1over{frac_denom}'
 
-        # Build model paths for this fraction
         direct_model_path = (
-            f'{base_model_path}/SPARC_direct_models_trainsize/'
+            f'{trainsize_base_path}/SPARC_direct_models_trainsize/'
             f'parsimonious_direct_models_{task_folder_name}_20tp_topchemos_att_modular_trainsize_{frac_tag}'
         )
         finetuned_model_path = (
-            f'{base_model_path}/SPARC_finetuned_models_trainsize/'
+            f'{trainsize_base_path}/SPARC_finetuned_models_trainsize/'
             f'parsimonious_finetuned_models_{task_folder_name}_20tp_topchemos_att_modular_trainsize_{frac_tag}'
         )
 
@@ -380,7 +374,6 @@ for data_fraction in ALL_FRACTIONS:
         if data_fraction not in model_performance_dict[model_name]:
             model_performance_dict[model_name][data_fraction] = {}
 
-        # Check if all folds already evaluated for this fraction
         if all(vf in model_performance_dict[model_name][data_fraction] for vf in all_folds):
             print("  All folds already evaluated for this fraction, skipping.")
             continue
@@ -395,16 +388,11 @@ for data_fraction in ALL_FRACTIONS:
                 print(f"  Fold {val_fold}: directory not found ({model_folder}), skipping.")
                 continue
 
-            # Checkpoint selection MUST match eval_1 exactly, otherwise a fold with
-            # multiple saved epoch checkpoints can resolve to a different epoch here
-            # than in eval_1 (os.listdir order is arbitrary), producing small but
-            # systematic per-fold metric drift. eval_1 uses:
-            #     [el for el in os.listdir(model_folder) if 'epoch' in el][0]
-            # i.e. the FIRST entry whose name contains 'epoch' (no .ckpt filter).
+            # same checkpoint pick as eval_1: first listdir entry containing 'epoch'
+            # (with several checkpoints, a different rule would pick a different epoch)
             ckpts = [f for f in os.listdir(model_folder) if 'epoch' in f]
 
-            # Also check version directories for restarts (fallback only; eval_1 has
-            # no equivalent, but this only fires when the primary list is empty).
+            # fallback: version directories from restarts
             if not ckpts:
                 log_dir = f'{model_folder}/logs_csv/lightning_logs_csv'
                 if os.path.exists(log_dir):
@@ -441,20 +429,19 @@ for data_fraction in ALL_FRACTIONS:
                     meds_l=med_of_choice,
                     side_effects_num_infusion=add_num_infusion,
                     temporal_aggregation='attention',
-                    loss_option=load_loss_option,  # 'default' to match eval_1 reference
-                    # Flags aligned with eval_1 (reference) so inputs/outputs match training
+                    loss_option=load_loss_option,  # as in eval_1
                     schedule=schedule_option,
                     include_gcsf=include_gcsf,
                     use_gcsf=include_gcsf,
                     use_sigmoid=use_sigmoid,
                     missing_mask=missing_mask,
                     lr=learning_rate,
-                    # 060726-specific parameters (modular tokenization, continuous time, etc.)
                     module_index_cfg=module_index_cfg,
                     use_module_tokenizer=use_module_tokenizer,
                     use_continuous_time=use_continuous_time,
                     n_static_features=n_static_features,
                     post_mlp_dropout=post_mlp_dropout,
+                    batch_first=(args.batch_first == 'True'),
                 )
             except Exception as e:
                 print(f"  Fold {val_fold}: failed to load checkpoint — {e}")
@@ -541,7 +528,7 @@ for data_fraction in ALL_FRACTIONS:
                 print(f"    This may be expected for extreme fractions.")
                 continue
 
-# Summary statistics across all fractions
+# Summary across fractions
 import numpy as np
 
 print("\n" + "="*80)
@@ -574,7 +561,7 @@ for data_fraction in ALL_FRACTIONS:
             else:
                 print(f"    {metric:40s}  — (no data)")
 
-    # Compute delta for this fraction
+    # finetuned - direct
     direct_folds   = model_performance_dict.get('SPARC_direct', {}).get(data_fraction, {})
     finetune_folds = model_performance_dict.get('SPARC_finetuned', {}).get(data_fraction, {})
     shared_folds   = sorted(set(direct_folds) & set(finetune_folds))

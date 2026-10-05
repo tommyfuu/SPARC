@@ -1,13 +1,7 @@
 """Paired t-test of per-feature MSE: SPARC-P ensemble vs the random-chance baseline.
 
-Each time-series feature is one paired observation. Reports the t-statistic,
-p-value, Cohen's d, percent MSE reduction, and how many features improved, plus
-a scatter of the two MSEs and a histogram of their differences.
-
-Reads the CSV written by eval_0_pretrained_mse_vs_chance.py.
-
-Usage:
-    python eval_0_mse_pairwise_test.py --input_csv .../mse_results_MSK_CAIA_parsimonious.csv
+Reads the CSV from eval_0_pretrained_mse_vs_chance.py; each time-series feature is one pair.
+Usage: python eval_0_mse_pairwise_test.py --input_csv .../mse_results_MSK_CAIA_parsimonious.csv
 """
 
 import os
@@ -21,7 +15,7 @@ import argparse
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 
-# COMMAND-LINE ARGUMENTS
+# command-line arguments
 parser = argparse.ArgumentParser(description='Statistical comparison of MSE between SPARC-P and Random Chance')
 parser.add_argument('--input_csv', type=str, required=True,
                     help='Path to MSE results CSV file')
@@ -30,7 +24,7 @@ parser.add_argument('--output_dir', type=str, default=None,
 
 args = parser.parse_args()
 
-# LOAD DATA
+# load data
 print("\n" + "="*70)
 print("LOADING MSE RESULTS")
 print("="*70)
@@ -41,7 +35,6 @@ if not os.path.exists(args.input_csv):
 df = pd.read_csv(args.input_csv)
 print(f"Loaded {len(df)} rows from {args.input_csv}")
 
-# Determine output directory
 if args.output_dir is None:
     args.output_dir = os.path.dirname(args.input_csv)
 os.makedirs(args.output_dir, exist_ok=True)
@@ -50,7 +43,7 @@ os.makedirs(args.output_dir, exist_ok=True)
 filename = os.path.basename(args.input_csv)
 dataset_info = filename.replace('mse_results_', '').replace('.csv', '')
 
-# FILTER DATA
+# filter data
 print("\n" + "="*70)
 print("FILTERING DATA")
 print("="*70)
@@ -68,7 +61,7 @@ random_baseline = df[(df['model'] == 'Random_Chance') &
 print(f"SPARC-P ensemble: {len(sparc_ensemble)} features")
 print(f"Random Chance baseline: {len(random_baseline)} features")
 
-# Merge on feature_name to ensure paired comparison
+# merge on feature_name so the comparison is paired
 merged = pd.merge(
     sparc_ensemble[['feature_name', 'feature_idx', 'mse']],
     random_baseline[['feature_name', 'mse']],
@@ -86,16 +79,14 @@ if len(merged_clean) < 3:
     print("ERROR: Not enough valid features for statistical test (need at least 3)")
     exit(1)
 
-# STATISTICAL TESTS
+# statistical tests
 print("\n" + "="*70)
 print("STATISTICAL ANALYSIS")
 print("="*70)
 
-# Extract MSE arrays
 mse_sparc = merged_clean['mse_sparc'].values
 mse_baseline = merged_clean['mse_baseline'].values
 
-# Basic statistics
 mean_sparc = np.mean(mse_sparc)
 mean_baseline = np.mean(mse_baseline)
 std_sparc = np.std(mse_sparc, ddof=1)
@@ -157,17 +148,16 @@ pct_improved = n_improved / n_total * 100
 print(f"\nFeatures Improved:")
 print(f"  {n_improved}/{n_total} ({pct_improved:.1f}%) features have lower MSE with SPARC-P")
 
-# VISUALIZATION
+# visualization
 print("\n" + "="*70)
 print("CREATING VISUALIZATION")
 print("="*70)
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-# --- Plot 1: Scatter plot with identity line ---
+# plot 1: scatter with identity line
 ax1 = axes[0]
 
-# Scatter plot
 ax1.scatter(mse_baseline, mse_sparc, alpha=0.6, s=50, edgecolors='black', linewidths=0.5)
 
 # Identity line (y = x)
@@ -192,7 +182,7 @@ ax1.legend(loc='lower right', fontsize=9)
 ax1.grid(True, alpha=0.3)
 ax1.set_aspect('equal', adjustable='box')
 
-# --- Plot 2: Histogram of differences ---
+# plot 2: histogram of differences
 ax2 = axes[1]
 
 differences = mse_sparc - mse_baseline
@@ -208,19 +198,18 @@ ax2.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
 
-# Save plot
 output_file = f'{args.output_dir}/mse_comparison_pairwise_test_{dataset_info}.pdf'
 plt.savefig(output_file, bbox_inches='tight', dpi=300)
 print(f"Saved plot to: {output_file}")
 
-# Also save as PNG for easy viewing
+# also save as PNG
 output_file_png = output_file.replace('.pdf', '.png')
 plt.savefig(output_file_png, bbox_inches='tight', dpi=300)
 print(f"Saved plot to: {output_file_png}")
 
 plt.close()
 
-# SAVE DETAILED RESULTS TO CSV
+# save detailed results to csv
 print("\n" + "="*70)
 print("SAVING DETAILED RESULTS")
 print("="*70)
@@ -230,10 +219,8 @@ merged_clean['mse_difference'] = merged_clean['mse_sparc'] - merged_clean['mse_b
 merged_clean['mse_improvement_pct'] = (merged_clean['mse_baseline'] - merged_clean['mse_sparc']) / merged_clean['mse_baseline'] * 100
 merged_clean['sparc_is_better'] = merged_clean['mse_sparc'] < merged_clean['mse_baseline']
 
-# Sort by improvement percentage
 merged_clean_sorted = merged_clean.sort_values('mse_improvement_pct', ascending=False)
 
-# Save to CSV
 detailed_output_file = f'{args.output_dir}/mse_comparison_detailed_{dataset_info}.csv'
 merged_clean_sorted.to_csv(detailed_output_file, index=False)
 print(f"Saved detailed comparison to: {detailed_output_file}")
@@ -245,7 +232,7 @@ print(merged_clean_sorted.head(10)[['feature_name', 'mse_sparc', 'mse_baseline',
 print(f"\nBottom 10 features (least improvement or worse):")
 print(merged_clean_sorted.tail(10)[['feature_name', 'mse_sparc', 'mse_baseline', 'mse_improvement_pct']].to_string(index=False))
 
-# SAVE SUMMARY STATISTICS
+# save summary statistics
 summary_stats = {
     'dataset': [dataset_info],
     'n_features': [len(merged_clean)],
