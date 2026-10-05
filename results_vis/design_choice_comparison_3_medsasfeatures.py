@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -19,7 +19,6 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 import sparc_paths
-# Use the fixed versions of data loaders and model
 from data_loaders_inf_risk_fixed import *
 from dataset_loading import load_dataset
 from MSK_featurename_list import build_module_index_config
@@ -54,7 +53,7 @@ dataset = args.dataset
 if not bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option_base)):
     raise ValueError(f"Invalid option: {option_base}. Must be one of 'anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', or 'Liver_toxicity'.")
 
-# Define medication configurations for each side effect
+# Medication sets per side effect
 med_configs = {
     'AKI': ["CISPLATIN", "IFOSFAMIDE", "PEMETREXED", "METHOTREXATE", "PAMIDRONATE", "ZOLEDRONIC ACID"],
     'Liver_toxicity': ["IPILIMUMAB", "ATEZOLIZUMAB", "NIVOLUMAB", "PEMBROLIZUMAB", "AVELUMAB", "CEMIPLIMAB", "DOSTARLIMAB"],
@@ -69,7 +68,6 @@ med_configs = {
 # Get medication configuration for current task
 med_of_choice = med_configs[option_base]
 
-# Convert to list format expected by the data loader
 def process_med_list(med_list):
     """Convert medication list to the format expected by data loader."""
     result = []
@@ -83,14 +81,14 @@ def process_med_list(med_list):
 med_of_choice_processed = process_med_list(med_of_choice)
 print("Medication configuration:", med_of_choice_processed)
 
-## HYPERPARAMETERS ##
+# hyperparameters
 batch_size = 512
 competing_risk_death_check = False
 include_gcsf = False
 days = 30
 add_num_infusion = True
 
-# Architecture parameters for 060726 models
+# Architecture params for the 060726 models
 use_module_tokenizer = True   # -umt True
 use_continuous_time = True    # -uct True
 post_mlp_dropout = 0.2        # -pmd 0.2
@@ -100,7 +98,7 @@ learning_rate = 1e-4
 missing_mask = True
 temporal_aggregation = 'attention'
 
-# Determine module configuration
+# Module configuration
 if modules == 'all':
     data_modules_to_include = ['gender', 'age', 'basic_lab', 'basic_vitals', 'extra_lab', 'extra_vitals']
     component = 'all'
@@ -117,7 +115,6 @@ elif modules == 'parsimonious':
 
 print("Checkpoint 1: Loading dataset using dataset_loading.py")
 
-# Load data using the centralized dataset_loading module
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
     data_source_path=data_source_path,
@@ -135,23 +132,22 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 print("modular_featuredim_dict", modular_featuredim_dict)
 print("Data loading complete")
 
-# Define model paths
-all_model_path = sparc_paths.SPARC_MODEL_ROOT
+# Model paths
+# batch_first=True arms: reference from A9_batchfirst, meds-as-feature from A12.
+ABLATION_ROOT = os.environ.get('SPARC_ABLATION_ROOT',
+                               '/data1/morrisq/fuc/SPARC_ablation_direct_092326')
+BATCH_FIRST = True
 
-# Determine loss function for med_as_feature models based on task
-# AKI and Liver_toxicity use RISK, others use HYBRID
-if option_base in ['AKI', 'Liver_toxicity']:
-    medasfeature_loss = 'risk'
-else:
-    medasfeature_loss = 'hybrid'
+# Both arms share the loss stem so only -mf differs.
+stem_loss = 'risk' if option_base in ['AKI', 'Liver_toxicity'] else 'hybrid'
 
-# Define model configurations
+# Model configurations
 model_configs = {
     'med_as_feature_False': {
         'option': f'{option_base}_risk',
         'temporal_aggregation': 'attention',
         'loss_option': 'default',
-        'path': f'{all_model_path}/{modules}_MSK_060726/SPARC_direct_models/parsimonious_direct_models_risk_{option_base}_20tp_topchemos_att_modular',
+        'path': f'{ABLATION_ROOT}/A9_batchfirst/{modules}_MSK_060726/SPARC_direct_models/parsimonious_direct_models_{stem_loss}_{option_base}_20tp_topchemos_att_modular',
         'description': 'Medications NOT as features (default)',
         'med_as_feature': False
     },
@@ -159,24 +155,20 @@ model_configs = {
         'option': f'{option_base}_risk',
         'temporal_aggregation': 'attention',
         'loss_option': 'default',
-        'path': f'{all_model_path}/{modules}_MSK_060726/med_as_feature_exp/parsimonious_direct_models_{medasfeature_loss}_{option_base}_20tp_topchemos_att_medasfeature_modular',
+        'path': f'{ABLATION_ROOT}/A12_dc3medsfeat/{modules}_MSK_060726/med_as_feature_exp/parsimonious_direct_models_{stem_loss}_{option_base}_20tp_topchemos_att_medasfeature_modular',
         'description': 'Medications as features',
         'med_as_feature': True
     }
 }
 
-# # if AKI add _redo to the paths
-# if option_base == 'AKI':
-#     model_configs['med_as_feature_False']['path'] += '_redo'
-#     model_configs['med_as_feature_True']['path'] += '_redo'
 
-# Generate the split dict from fold dict
+# Test split from the fold dict
 if dataset == 'MSK':
     with open(f'{data_source_path}/{dataset}/fold_dict_11.pickle', 'rb') as handle:
         fold_dict = pickle.load(handle)
 elif dataset == 'MSK_timeshift':
     fold_dict = {10: data_dict_lab_dict['age'].keys()}
-    # Get all DMP_ID in the MSK dataset and exclude from the fold_dict
+    # Timeshift test set: patients not in the original MSK cohort
     data_path = f'{data_source_path}/MSK/postbc_DMP_ID_to_DATES_to_TESTSVALUES_DICT_deidentified_MSK.pickle'
     with open(data_path, 'rb') as handle:
         og_set = pickle.load(handle)
@@ -186,12 +178,12 @@ testDMP_IDs = fold_dict[10]
 testDMP_IDs = [DMP_ID for DMP_ID in testDMP_IDs if DMP_ID in data_dict_lab_dict.get('basic_lab', data_dict_lab_dict.get('age', {})).keys()]
 split_dict = {'train': [], 'val': [], 'test': testDMP_IDs}
 
-save_name = f'{all_model_path}/results_vis_060726/design_choices_3_medsasfeatures/SPARC_medsasfeatures_{modules}_{option_base}_{dataset}.csv'
+save_name = os.environ.get('SPARC_DC3_RESULTS', f'{ABLATION_ROOT}/results') + f'/design_choices_3_medsasfeatures/SPARC_medsasfeatures_{modules}_{option_base}_{dataset}.csv'
 os.makedirs(os.path.dirname(save_name), exist_ok=True)
 
 model_performance_dict = {}
 
-# Check if the save csv file exists, if it does, load it
+# Reuse cached results if the CSV exists
 if os.path.exists(save_name):
     print(f"Loading existing model performance dict from {save_name}")
     saved_df = pd.read_csv(save_name)
@@ -212,10 +204,9 @@ if os.path.exists(save_name):
 all_folds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 model_set_option = 'side_effects_risk'
 
-# Build module index config for 060726 models
+# Module index config for the 060726 models
 module_index_cfg = build_module_index_config(modular_featuredim_dict)
 
-# Calculate n_static_features
 static_module_names = ['gender', 'age']
 n_static_features = sum(modular_featuredim_dict.get(mod, 0) for mod in static_module_names)
 
@@ -229,12 +220,12 @@ for model_name, config in model_configs.items():
 
     pl.seed_everything(rseed)
 
-    # Only load dataloader if NOT (already exist for all 10 folds for this model)
+    # Skip models that already have all folds
     if model_name in model_performance_dict and False not in [fold in model_performance_dict[model_name] for fold in all_folds]:
         print(f"Data module for model {model_name} already exists for all folds, skipping")
         continue
 
-    # Create data module with appropriate med_as_feature setting
+    # Data module with this arm's med_as_feature setting
     data_module = FlexibleFeatureDataModule(
         data_dict_lab_dict, split_dict, dataset=dataset, component=component,
         batch_size=512, max_time_len=20, num_workers=1,
@@ -245,7 +236,6 @@ for model_name, config in model_configs.items():
     )
     print(f"Data module initiated for task {option_base}_risk with med_as_feature={config['med_as_feature']}")
 
-    # Check performance for each fold
     for val_fold in all_folds:
         print(f"\nModel: {model_name}, Fold: {val_fold}")
         pl.seed_everything(rseed)
@@ -258,7 +248,6 @@ for model_name, config in model_configs.items():
         else:
             model_performance_dict[model_name][val_fold] = {}
 
-        # Get model path
         model_folder = f'{config["path"]}/fold{val_fold}'
 
         print(f"Looking for model in: {model_folder}")
@@ -268,7 +257,7 @@ for model_name, config in model_configs.items():
             continue
 
         existing_files = os.listdir(model_folder)
-        # Find the checkpoint that has the highest val_loss (i.e. the one that is not last.ckpt)
+        # Use the saved epoch checkpoint, not last.ckpt
         epoch_files = [el for el in existing_files if 'epoch' in el]
         if len(epoch_files) == 0:
             print(f"WARNING: No epoch checkpoint found in {model_folder}")
@@ -279,7 +268,6 @@ for model_name, config in model_configs.items():
         optimal_model_path = os.path.join(model_folder, optimal_model_path)
         print(f"Loading model from: {optimal_model_path}")
 
-        # Load the model with appropriate configuration
         try:
             model = SPARC.load_from_checkpoint(
                 optimal_model_path,
@@ -288,6 +276,7 @@ for model_name, config in model_configs.items():
                 advanced_model="default",
                 max_time_len=20,
                 med_as_feature=config['med_as_feature'],
+                batch_first=BATCH_FIRST,
                 meds_l=med_of_choice_processed,
                 loss_option=config['loss_option'],
                 schedule=schedule_option,
@@ -310,13 +299,12 @@ for model_name, config in model_configs.items():
             print(f"Skipping fold {val_fold}")
             continue
 
-        # Move model to GPU if available
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
         model.eval()
         print(f"Model on device: {device}")
 
-        # Collect all predictions and ground truths from the entire test dataset
+        # Collect predictions over the full test set
         all_y_preds = []
         all_y_events = []
         all_time_to_events = []
@@ -325,7 +313,7 @@ for model_name, config in model_configs.items():
         batch_count = 0
         with torch.no_grad():
             for batch in data_module.test_dataloader():
-                # Prepare batch data (data_prep works with CPU data)
+                # data_prep works on CPU tensors
                 if include_gcsf:
                     xs_combined, y, mask, _, num_infusion, _, gcsf_groundtruth = model.data_prep(
                         batch, time_calibration=model.time_calibration,
@@ -339,8 +327,7 @@ for model_name, config in model_configs.items():
                     )
                     gcsf_groundtruth = None
 
-                # Move prepared data to GPU
-                # When med_as_feature=True, xs_combined is a tuple (xs, meds_data)
+                # With med_as_feature=True, xs_combined is (xs, meds_data)
                 if isinstance(xs_combined, tuple):
                     xs_combined = tuple(x.to(device) for x in xs_combined)
                 else:
@@ -350,21 +337,18 @@ for model_name, config in model_configs.items():
                 if gcsf_groundtruth is not None:
                     gcsf_groundtruth = gcsf_groundtruth.to(device)
 
-                # Get predictions
                 y_pred_logits = model(xs_combined, src_key_padding_mask=mask,
                                       num_infusion=num_infusion, gcsf_groundtruth=gcsf_groundtruth)
 
-                # Extract ground truth - ensure proper tensor dimensions
+                # Ground truth
                 fail_indicators = torch.as_tensor(y[0], device=device)
                 time_to_event = torch.as_tensor(y[1], device=device)
 
-                # Ensure tensors are at least 1D
                 if fail_indicators.dim() == 0:
                     fail_indicators = fail_indicators.unsqueeze(0)
                 if time_to_event.dim() == 0:
                     time_to_event = time_to_event.unsqueeze(0)
 
-                # Store batch results (move to CPU for concatenation to save GPU memory)
                 all_y_preds.append(y_pred_logits.detach().cpu())
                 all_y_events.append(fail_indicators.detach().cpu())
                 all_time_to_events.append(time_to_event.detach().cpu())
@@ -372,19 +356,16 @@ for model_name, config in model_configs.items():
 
                 batch_count += 1
 
-        # Concatenate all batches
         all_y_preds = torch.cat(all_y_preds, dim=0)
         all_y_events = torch.cat(all_y_events, dim=0)
         all_time_to_events = torch.cat(all_time_to_events, dim=0)
         all_num_infusions = torch.cat(all_num_infusions, dim=0)
 
-        # Evaluate on the entire test dataset
         c_idx_dict = calculate_weighted_c_index_by_infusion(
             all_y_preds, all_y_events, all_time_to_events, all_num_infusions,
             mode='val', option=config['option']
         )
 
-        # Extract metrics
         model_performance_dict[model_name][val_fold]['test_cindex_overall_valid'] = c_idx_dict.get('c_index_overall', None)
         model_performance_dict[model_name][val_fold]['test_cindex_weighted'] = c_idx_dict.get('c_index_weighted', None)
         model_performance_dict[model_name][val_fold]['test_auroc_nextinf_overall'] = c_idx_dict.get('auroc_next_infusion_overall', None)

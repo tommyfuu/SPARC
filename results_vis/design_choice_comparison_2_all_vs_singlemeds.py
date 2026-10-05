@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -19,7 +19,6 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 import sparc_paths
-# Use the fixed versions of data loaders and model
 from data_loaders_inf_risk_fixed import *
 from dataset_loading import load_dataset
 from MSK_featurename_list import build_module_index_config
@@ -54,14 +53,14 @@ dataset = args.dataset
 if not bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option_base)):
     raise ValueError(f"Invalid option: {option_base}. Must be one of 'anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', or 'Liver_toxicity'.")
 
-## HYPERPARAMETERS ##
+# hyperparameters
 batch_size = 512
 competing_risk_death_check = False
 include_gcsf = False
 days = 30
 add_num_infusion = True
 
-# Architecture parameters for 060726 models
+# Architecture params for the 060726 models
 use_module_tokenizer = True   # -umt True
 use_continuous_time = True    # -uct True
 post_mlp_dropout = 0.2        # -pmd 0.2
@@ -71,14 +70,13 @@ learning_rate = 1e-4
 missing_mask = True
 temporal_aggregation = 'attention'
 
-# Define medication configurations for each side effect
+# Medication sets per side effect
 med_configs = {
     'AKI': {
         'all_meds': ["CISPLATIN", "IFOSFAMIDE", "PEMETREXED", "METHOTREXATE", "PAMIDRONATE", "ZOLEDRONIC ACID"],
         'single_meds': {
             'CISPLATIN': ["CISPLATIN"],
             'IFOSFAMIDE': ["IFOSFAMIDE"],
-            # 'PEMETREXED_METHOTREXATE': ["PEMETREXED.METHOTREXATE"],
             'PEMETREXED': ["PEMETREXED"],
             'METHOTREXATE': ["METHOTREXATE"],
             'PAMIDRONATE': ["PAMIDRONATE"],
@@ -151,7 +149,6 @@ med_configs = {
 med_of_choice = med_configs[option_base]['all_meds']
 single_med_configs = med_configs[option_base]['single_meds']
 
-# Convert to list format expected by the data loader
 def process_med_list(med_list):
     """Convert medication list to the format expected by data loader."""
     result = []
@@ -168,11 +165,10 @@ print("All-meds configuration:", med_of_choice_processed)
 
 print("Checkpoint 1: Loading dataset using dataset_loading.py")
 
-# Load data using the centralized dataset_loading module
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
     data_source_path=data_source_path,
-    option=f'{option_base}_risk',  # Use risk version for data loading
+    option=f'{option_base}_risk',
     modules=modules,
     valfold=0,
     mode='test',
@@ -186,48 +182,50 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 print("modular_featuredim_dict", modular_featuredim_dict)
 print("Data loading complete")
 
-# Define model paths
-all_model_path = sparc_paths.SPARC_MODEL_ROOT
+# batch_first=True arms: single-med from A13_singlemed; all-meds from A9_batchfirst
+# (AKI, Liver_toxicity) or A10_dc1loss (anemia, febrile_neutropenia, neutropenia).
+ABLATION_ROOT = os.environ.get('SPARC_ABLATION_ROOT',
+                               '/data1/morrisq/fuc/SPARC_ablation_direct_092326')
+BATCH_FIRST = True
 
-# Build model configurations dictionary
 model_configs = {}
 
-# Determine loss version for single-med models based on task
-# AKI and Liver_toxicity use RISK, others use HYBRID
+# both arms use the risk loss so the comparison is loss-matched
+single_med_loss = 'risk'
 if option_base in ['AKI', 'Liver_toxicity']:
-    single_med_loss = 'risk'
+    ALLMEDS_ROOT = f'{ABLATION_ROOT}/A9_batchfirst'
 else:
-    single_med_loss = 'hybrid'
+    ALLMEDS_ROOT = f'{ABLATION_ROOT}/A10_dc1loss'
 
-# Add all-meds model (always use RISK for all-meds)
+# All-meds model (risk loss)
 model_configs['all_meds'] = {
     'option': f'{option_base}_risk',
     'temporal_aggregation': 'attention',
     'loss_option': 'default',
-    'path': f'{all_model_path}/{modules}_MSK_060726/SPARC_direct_models/parsimonious_direct_models_risk_{option_base}_20tp_topchemos_att_modular',
+    'path': f'{ALLMEDS_ROOT}/{modules}_MSK_060726/SPARC_direct_models/parsimonious_direct_models_risk_{option_base}_20tp_topchemos_att_modular',
     'description': f'All meds ({len(med_of_choice)} medications)',
     'meds': med_of_choice_processed
 }
 
-# Add single-med models (use task-specific loss)
+# Single-med models (risk loss)
 for med_name, med_list in single_med_configs.items():
     processed_med = process_med_list(med_list)
     model_configs[f'single_med_{med_name}'] = {
         'option': f'{option_base}_risk',
         'temporal_aggregation': 'attention',
         'loss_option': 'default',
-        'path': f'{all_model_path}/{modules}_MSK_060726/sg_med_exp/parsimonious_direct_models_{single_med_loss}_{option_base}_20tp_single_med_{med_name}_att_modular',
+        'path': f'{ABLATION_ROOT}/A13_singlemed/{modules}_MSK_060726/sg_med_exp/parsimonious_direct_models_{single_med_loss}_{option_base}_20tp_single_med_{med_name}_att_modular',
         'description': f'Single med: {med_name}',
         'meds': processed_med
     }
 
-# Generate the split dict from fold dict
+# Test split from the fold dict
 if dataset == 'MSK':
     with open(f'{data_source_path}/{dataset}/fold_dict_11.pickle', 'rb') as handle:
         fold_dict = pickle.load(handle)
 elif dataset == 'MSK_timeshift':
     fold_dict = {10: data_dict_lab_dict['age'].keys()}
-    # Get all DMP_ID in the MSK dataset and exclude from the fold_dict
+    # Timeshift test set: patients not in the original MSK cohort
     data_path = f'{data_source_path}/MSK/postbc_DMP_ID_to_DATES_to_TESTSVALUES_DICT_deidentified_MSK.pickle'
     with open(data_path, 'rb') as handle:
         og_set = pickle.load(handle)
@@ -237,16 +235,17 @@ testDMP_IDs = fold_dict[10]
 testDMP_IDs = [DMP_ID for DMP_ID in testDMP_IDs if DMP_ID in data_dict_lab_dict.get('basic_lab', data_dict_lab_dict.get('age', {})).keys()]
 split_dict = {'train': [], 'val': [], 'test': testDMP_IDs}
 
-save_name = f'{all_model_path}/results_vis_060726/design_choices_2_all_vs_singlemeds/SPARC_allmeds_vs_singlemeds_{modules}_{option_base}_{dataset}.csv'
+save_name = (os.environ.get('SPARC_DC2_RESULTS', f'{ABLATION_ROOT}/results')
+             + f'/design_choices_2_all_vs_singlemeds/SPARC_allmeds_vs_singlemeds_{modules}_{option_base}_{dataset}.csv')
 os.makedirs(os.path.dirname(save_name), exist_ok=True)
 
 model_performance_dict = {}
 
-# Check if the save csv file exists, if it does, load it
+# Reuse cached results if the CSV exists
 if os.path.exists(save_name):
     print(f"Loading existing model performance dict from {save_name}")
     saved_df = pd.read_csv(save_name)
-    performance_df_existing = saved_df.dropna(subset=['val_fold'])  # Only require val_fold to be non-NaN
+    performance_df_existing = saved_df.dropna(subset=['val_fold'])  # only require val_fold
     for index, row in performance_df_existing.iterrows():
         model_name = row['model']
         description = row.get('description', '')
@@ -283,10 +282,9 @@ if os.path.exists(save_name):
 all_folds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 model_set_option = 'side_effects_risk'
 
-# Build module index config for 060726 models
+# Module index config for the 060726 models
 module_index_cfg = build_module_index_config(modular_featuredim_dict)
 
-# Calculate n_static_features
 static_module_names = ['gender', 'age']
 n_static_features = sum(modular_featuredim_dict.get(mod, 0) for mod in static_module_names)
 
@@ -307,16 +305,14 @@ for med_name, med_list in single_med_configs.items():
 
     pl.seed_everything(rseed)
 
-    # Check if model path exists
     if not os.path.exists(all_meds_config['path']):
         print(f"WARNING: All-meds model path does not exist: {all_meds_config['path']}")
         print(f"Creating NON-EXISTENT placeholder rows for {med_name}")
 
-        # Create placeholder entries for all folds marked as non-existent
+        # Mark all folds as non-existent
         if model_name not in model_performance_dict:
             model_performance_dict[model_name] = {}
 
-        # Add to model_configs for later reference
         model_configs[model_name] = {
             'option': f'{option_base}_risk',
             'temporal_aggregation': 'attention',
@@ -353,10 +349,8 @@ for med_name, med_list in single_med_configs.items():
 
         continue
 
-    # Only load dataloader if NOT (already exist for all 10 folds for this model)
-    # Also check if the model is not marked as non-existent
+    # Skip models that already have all folds
     if model_name in model_performance_dict and False not in [fold in model_performance_dict[model_name] for fold in all_folds]:
-        # Check if this is a NON-EXISTENT model that should be skipped
         if model_name in model_configs and 'NON-EXISTENT' in model_configs[model_name].get('description', ''):
             print(f"Model {model_name} already marked as NON-EXISTENT for all folds, skipping")
         else:
@@ -380,17 +374,15 @@ for med_name, med_list in single_med_configs.items():
     if hasattr(data_module, 'test_dataset') and data_module.test_dataset is not None:
         try:
             test_sample_count = len(data_module.test_dataset)
-            # Count positive samples (events) in test set
             if test_sample_count > 0:
                 for i in range(test_sample_count):
                     try:
                         sample = data_module.test_dataset[i]
-                        # The target is typically the second element
                         if isinstance(sample, (list, tuple)) and len(sample) >= 2:
                             y = sample[1]
-                            # y is typically (event_indicator, time_to_event)
+                            # y is (event_indicator, time_to_event)
                             if isinstance(y, (list, tuple)) and len(y) >= 1:
-                                if y[0] == 1:  # Event occurred
+                                if y[0] == 1:
                                     test_positive_count += 1
                             elif torch.is_tensor(y):
                                 if y.item() == 1:
@@ -403,16 +395,15 @@ for med_name, med_list in single_med_configs.items():
 
     print(f"Test samples for {med_name}: {test_sample_count} (positives: {test_positive_count})")
 
-    # Check if there are enough samples in the test set
+    # Skip if the test set is too small
     if test_sample_count < 50:
         print(f"WARNING: Insufficient test samples ({test_sample_count} < 50) for {med_name}")
         print(f"Creating placeholder rows for this medication")
 
-        # Create placeholder entries for all folds with sample counts but no performance metrics
+        # Placeholder rows with sample counts but no metrics
         if model_name not in model_performance_dict:
             model_performance_dict[model_name] = {}
 
-        # Add to model_configs for later reference
         model_configs[model_name] = {
             'option': f'{option_base}_risk',
             'temporal_aggregation': 'attention',
@@ -449,7 +440,6 @@ for med_name, med_list in single_med_configs.items():
 
         continue
 
-    # Add to model_configs for later reference
     model_configs[model_name] = {
         'option': f'{option_base}_risk',
         'temporal_aggregation': 'attention',
@@ -459,7 +449,6 @@ for med_name, med_list in single_med_configs.items():
         'meds': processed_med
     }
 
-    # Check performance for each fold
     for val_fold in all_folds:
         print(f"\nModel: {model_name}, Fold: {val_fold}")
         pl.seed_everything(rseed)
@@ -472,7 +461,7 @@ for med_name, med_list in single_med_configs.items():
         else:
             model_performance_dict[model_name][val_fold] = {}
 
-        # Get model path (use all_meds model path)
+        # all-meds checkpoint
         model_folder = f'{all_meds_config["path"]}/fold{val_fold}'
 
         if not os.path.exists(model_folder):
@@ -486,14 +475,14 @@ for med_name, med_list in single_med_configs.items():
                 'num_test_samples': None,
                 'num_positive_samples': None,
             }
-            # Update description to show at least one fold is missing
+            # Flag the missing fold in the description
             if 'NON-EXISTENT FOLD' not in model_configs[model_name]['description']:
                 model_configs[model_name]['description'] += ' (NON-EXISTENT FOLD)'
             continue
 
         print(f"Looking for model in: {model_folder}")
         existing_files = os.listdir(model_folder)
-        # Find the checkpoint that has the highest val_loss (i.e. the one that is not last.ckpt)
+        # Use the saved epoch checkpoint, not last.ckpt
         epoch_files = [el for el in existing_files if 'epoch' in el]
         if len(epoch_files) == 0:
             print(f"WARNING: No epoch checkpoint found in {model_folder}")
@@ -506,7 +495,7 @@ for med_name, med_list in single_med_configs.items():
                 'num_test_samples': None,
                 'num_positive_samples': None,
             }
-            # Update description to show at least one fold is missing
+            # Flag the missing fold in the description
             if 'NON-EXISTENT FOLD' not in model_configs[model_name]['description']:
                 model_configs[model_name]['description'] += ' (NON-EXISTENT FOLD)'
             continue
@@ -524,7 +513,7 @@ for med_name, med_list in single_med_configs.items():
                 advanced_model="default",
                 max_time_len=20,
                 med_as_feature=False,
-                meds_l=all_meds_config['meds'],  # Use all_meds configuration
+                meds_l=all_meds_config['meds'],
                 loss_option=all_meds_config['loss_option'],
                 schedule=schedule_option,
                 side_effects_num_infusion=add_num_infusion,
@@ -538,6 +527,7 @@ for med_name, med_list in single_med_configs.items():
                 use_continuous_time=use_continuous_time,
                 n_static_features=n_static_features,
                 post_mlp_dropout=post_mlp_dropout,
+                batch_first=BATCH_FIRST,
                 lr=learning_rate,
             )
             print("Model loaded successfully")
@@ -546,13 +536,12 @@ for med_name, med_list in single_med_configs.items():
             print(f"Skipping fold {val_fold}")
             continue
 
-        # Move model to GPU if available
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
         model.eval()
         print(f"Model on device: {device}")
 
-        # Collect all predictions and ground truths from the entire test dataset
+        # Collect predictions over the full test set
         all_y_preds = []
         all_y_events = []
         all_time_to_events = []
@@ -561,7 +550,7 @@ for med_name, med_list in single_med_configs.items():
         batch_count = 0
         with torch.no_grad():
             for batch in data_module.test_dataloader():
-                # Prepare batch data (data_prep works with CPU data)
+                # data_prep works on CPU tensors
                 if include_gcsf:
                     xs_combined, y, mask, _, num_infusion, _, gcsf_groundtruth = model.data_prep(
                         batch, time_calibration=model.time_calibration,
@@ -575,28 +564,24 @@ for med_name, med_list in single_med_configs.items():
                     )
                     gcsf_groundtruth = None
 
-                # Move prepared data to GPU
                 xs_combined = xs_combined.to(device)
                 mask = mask.to(device)
                 num_infusion = num_infusion.to(device)
                 if gcsf_groundtruth is not None:
                     gcsf_groundtruth = gcsf_groundtruth.to(device)
 
-                # Get predictions
                 y_pred_logits = model(xs_combined, src_key_padding_mask=mask,
                                       num_infusion=num_infusion, gcsf_groundtruth=gcsf_groundtruth)
 
-                # Extract ground truth - ensure proper tensor dimensions
+                # Ground truth
                 fail_indicators = torch.as_tensor(y[0], device=device)
                 time_to_event = torch.as_tensor(y[1], device=device)
 
-                # Ensure tensors are at least 1D
                 if fail_indicators.dim() == 0:
                     fail_indicators = fail_indicators.unsqueeze(0)
                 if time_to_event.dim() == 0:
                     time_to_event = time_to_event.unsqueeze(0)
 
-                # Store batch results (move to CPU for concatenation to save GPU memory)
                 all_y_preds.append(y_pred_logits.detach().cpu())
                 all_y_events.append(fail_indicators.detach().cpu())
                 all_time_to_events.append(time_to_event.detach().cpu())
@@ -604,19 +589,16 @@ for med_name, med_list in single_med_configs.items():
 
                 batch_count += 1
 
-        # Concatenate all batches
         all_y_preds = torch.cat(all_y_preds, dim=0)
         all_y_events = torch.cat(all_y_events, dim=0)
         all_time_to_events = torch.cat(all_time_to_events, dim=0)
         all_num_infusions = torch.cat(all_num_infusions, dim=0)
 
-        # Evaluate on the entire test dataset
         c_idx_dict = calculate_weighted_c_index_by_infusion(
             all_y_preds, all_y_events, all_time_to_events, all_num_infusions,
             mode='val', option=all_meds_config['option']
         )
 
-        # Extract metrics
         model_performance_dict[model_name][val_fold]['test_cindex_overall_valid'] = c_idx_dict.get('c_index_overall', None)
         model_performance_dict[model_name][val_fold]['test_cindex_weighted'] = c_idx_dict.get('c_index_weighted', None)
         model_performance_dict[model_name][val_fold]['test_auroc_nextinf_overall'] = c_idx_dict.get('auroc_next_infusion_overall', None)
@@ -646,7 +628,7 @@ print("STEP 2: Testing models trained on individual medications")
 print("="*80 + "\n")
 
 for model_name, config in model_configs.items():
-    # Skip the all_meds_on_* entries as they were already processed in step 1
+    # all_meds_on_* entries were handled in step 1
     if model_name.startswith('all_meds_on_'):
         continue
 
@@ -659,16 +641,14 @@ for model_name, config in model_configs.items():
 
     pl.seed_everything(rseed)
 
-    # Check if model path exists
     if not os.path.exists(config['path']):
         print(f"WARNING: Model path does not exist: {config['path']}")
         print(f"Creating NON-EXISTENT placeholder rows for {model_name}")
 
-        # Create placeholder entries for all folds marked as non-existent
+        # Mark all folds as non-existent
         if model_name not in model_performance_dict:
             model_performance_dict[model_name] = {}
 
-        # Update description to indicate non-existent
         model_configs[model_name]['description'] = f'NON-EXISTENT: {config["description"]}'
 
         for val_fold in all_folds:
@@ -698,10 +678,8 @@ for model_name, config in model_configs.items():
 
         continue
 
-    # Only load dataloader if NOT (already exist for all 10 folds for this model)
-    # Also check if the model is not marked as non-existent
+    # Skip models that already have all folds
     if model_name in model_performance_dict and False not in [fold in model_performance_dict[model_name] for fold in all_folds]:
-        # Check if this is a NON-EXISTENT model that should be skipped
         if model_name in model_configs and 'NON-EXISTENT' in model_configs[model_name].get('description', ''):
             print(f"Model {model_name} already marked as NON-EXISTENT for all folds, skipping")
         else:
@@ -725,17 +703,15 @@ for model_name, config in model_configs.items():
     if hasattr(data_module, 'test_dataset') and data_module.test_dataset is not None:
         try:
             test_sample_count = len(data_module.test_dataset)
-            # Count positive samples (events) in test set
             if test_sample_count > 0:
                 for i in range(test_sample_count):
                     try:
                         sample = data_module.test_dataset[i]
-                        # The target is typically the second element
                         if isinstance(sample, (list, tuple)) and len(sample) >= 2:
                             y = sample[1]
-                            # y is typically (event_indicator, time_to_event)
+                            # y is (event_indicator, time_to_event)
                             if isinstance(y, (list, tuple)) and len(y) >= 1:
-                                if y[0] == 1:  # Event occurred
+                                if y[0] == 1:
                                     test_positive_count += 1
                             elif torch.is_tensor(y):
                                 if y.item() == 1:
@@ -748,12 +724,12 @@ for model_name, config in model_configs.items():
 
     print(f"Test samples for {model_name}: {test_sample_count} (positives: {test_positive_count})")
 
-    # For single-med models, check if there are enough samples in the test set
+    # Single-med models: skip if the test set is too small
     if model_name.startswith('single_med_') and test_sample_count < 50:
         print(f"WARNING: Insufficient test samples ({test_sample_count} < 50) for {model_name}")
         print(f"Creating placeholder rows for this medication")
 
-        # Create placeholder entries for all folds with sample counts but no performance metrics
+        # Placeholder rows with sample counts but no metrics
         if model_name not in model_performance_dict:
             model_performance_dict[model_name] = {}
 
@@ -784,7 +760,6 @@ for model_name, config in model_configs.items():
 
         continue
 
-    # Check performance for each fold
     for val_fold in all_folds:
         print(f"\nModel: {model_name}, Fold: {val_fold}")
         pl.seed_everything(rseed)
@@ -797,7 +772,6 @@ for model_name, config in model_configs.items():
         else:
             model_performance_dict[model_name][val_fold] = {}
 
-        # Get model path
         model_folder = f'{config["path"]}/fold{val_fold}'
 
         if not os.path.exists(model_folder):
@@ -811,14 +785,14 @@ for model_name, config in model_configs.items():
                 'num_test_samples': None,
                 'num_positive_samples': None,
             }
-            # Update description to show at least one fold is missing
+            # Flag the missing fold in the description
             if 'NON-EXISTENT FOLD' not in model_configs[model_name]['description']:
                 model_configs[model_name]['description'] += ' (NON-EXISTENT FOLD)'
             continue
 
         print(f"Looking for model in: {model_folder}")
         existing_files = os.listdir(model_folder)
-        # Find the checkpoint that has the highest val_loss (i.e. the one that is not last.ckpt)
+        # Use the saved epoch checkpoint, not last.ckpt
         epoch_files = [el for el in existing_files if 'epoch' in el]
         if len(epoch_files) == 0:
             print(f"WARNING: No epoch checkpoint found in {model_folder}")
@@ -831,7 +805,7 @@ for model_name, config in model_configs.items():
                 'num_test_samples': None,
                 'num_positive_samples': None,
             }
-            # Update description to show at least one fold is missing
+            # Flag the missing fold in the description
             if 'NON-EXISTENT FOLD' not in model_configs[model_name]['description']:
                 model_configs[model_name]['description'] += ' (NON-EXISTENT FOLD)'
             continue
@@ -840,7 +814,6 @@ for model_name, config in model_configs.items():
         optimal_model_path = os.path.join(model_folder, optimal_model_path)
         print(f"Loading model from: {optimal_model_path}")
 
-        # Load the model with appropriate configuration
         try:
             model = SPARC.load_from_checkpoint(
                 optimal_model_path,
@@ -863,6 +836,7 @@ for model_name, config in model_configs.items():
                 use_continuous_time=use_continuous_time,
                 n_static_features=n_static_features,
                 post_mlp_dropout=post_mlp_dropout,
+                batch_first=BATCH_FIRST,
                 lr=learning_rate,
             )
             print("Model loaded successfully")
@@ -871,13 +845,12 @@ for model_name, config in model_configs.items():
             print(f"Skipping fold {val_fold}")
             continue
 
-        # Move model to GPU if available
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
         model.eval()
         print(f"Model on device: {device}")
 
-        # Collect all predictions and ground truths from the entire test dataset
+        # Collect predictions over the full test set
         all_y_preds = []
         all_y_events = []
         all_time_to_events = []
@@ -886,7 +859,7 @@ for model_name, config in model_configs.items():
         batch_count = 0
         with torch.no_grad():
             for batch in data_module.test_dataloader():
-                # Prepare batch data (data_prep works with CPU data)
+                # data_prep works on CPU tensors
                 if include_gcsf:
                     xs_combined, y, mask, _, num_infusion, _, gcsf_groundtruth = model.data_prep(
                         batch, time_calibration=model.time_calibration,
@@ -900,28 +873,24 @@ for model_name, config in model_configs.items():
                     )
                     gcsf_groundtruth = None
 
-                # Move prepared data to GPU
                 xs_combined = xs_combined.to(device)
                 mask = mask.to(device)
                 num_infusion = num_infusion.to(device)
                 if gcsf_groundtruth is not None:
                     gcsf_groundtruth = gcsf_groundtruth.to(device)
 
-                # Get predictions
                 y_pred_logits = model(xs_combined, src_key_padding_mask=mask,
                                       num_infusion=num_infusion, gcsf_groundtruth=gcsf_groundtruth)
 
-                # Extract ground truth - ensure proper tensor dimensions
+                # Ground truth
                 fail_indicators = torch.as_tensor(y[0], device=device)
                 time_to_event = torch.as_tensor(y[1], device=device)
 
-                # Ensure tensors are at least 1D
                 if fail_indicators.dim() == 0:
                     fail_indicators = fail_indicators.unsqueeze(0)
                 if time_to_event.dim() == 0:
                     time_to_event = time_to_event.unsqueeze(0)
 
-                # Store batch results (move to CPU for concatenation to save GPU memory)
                 all_y_preds.append(y_pred_logits.detach().cpu())
                 all_y_events.append(fail_indicators.detach().cpu())
                 all_time_to_events.append(time_to_event.detach().cpu())
@@ -929,19 +898,16 @@ for model_name, config in model_configs.items():
 
                 batch_count += 1
 
-        # Concatenate all batches
         all_y_preds = torch.cat(all_y_preds, dim=0)
         all_y_events = torch.cat(all_y_events, dim=0)
         all_time_to_events = torch.cat(all_time_to_events, dim=0)
         all_num_infusions = torch.cat(all_num_infusions, dim=0)
 
-        # Evaluate on the entire test dataset
         c_idx_dict = calculate_weighted_c_index_by_infusion(
             all_y_preds, all_y_events, all_time_to_events, all_num_infusions,
             mode='val', option=config['option']
         )
 
-        # Extract metrics
         model_performance_dict[model_name][val_fold]['test_cindex_overall_valid'] = c_idx_dict.get('c_index_overall', None)
         model_performance_dict[model_name][val_fold]['test_cindex_weighted'] = c_idx_dict.get('c_index_weighted', None)
         model_performance_dict[model_name][val_fold]['test_auroc_nextinf_overall'] = c_idx_dict.get('auroc_next_infusion_overall', None)

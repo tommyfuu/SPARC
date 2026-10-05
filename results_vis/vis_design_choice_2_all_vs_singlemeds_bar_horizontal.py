@@ -1,18 +1,11 @@
-"""
-All-meds vs single-med models, per medication.
+"""All-meds vs single-med models per medication, from design_choice_comparison_2 CSVs.
 
-One figure per side-effect task, each with a weighted-AUROC and a weighted
-C-index panel. Medications are ordered by positive-sample ratio; bars are mean
-+/- std over folds.
-
-Reads the CSVs from design_choice_comparison_2_all_vs_singlemeds.py.
-
-Usage:
-    python vis_design_choice_2_all_vs_singlemeds_bar_horizontal.py
-    python vis_design_choice_2_all_vs_singlemeds_bar_horizontal.py --dataset MSK_CAIA_timeshift
+One figure per side-effect task (weighted AUROC and weighted C-index panels), meds ordered by
+positive ratio, bars mean +/- std over folds.
+Usage: python vis_design_choice_2_all_vs_singlemeds_bar_horizontal.py [--dataset MSK_CAIA_timeshift]
 """
 
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -38,15 +31,10 @@ from matplotlib.patches import Rectangle
 from scipy.stats import wilcoxon, ttest_rel, mannwhitneyu, ttest_ind
 
 
-# Both arms are scored on the same folds, so the comparison is paired; earlier
-# versions of this script used an unpaired test. At n=10 the smallest attainable
-# two-sided p is 0.00195, so the strongest comparisons all pin there -- read the
-# deltas, not the star tiers. The old unpaired tests stay selectable via -st.
+# Both arms use the same folds, so the default test is paired (unpaired tests via -st).
+# With n=10 folds the smallest Wilcoxon p is 0.00195, so the top comparisons all hit it.
 def paired_test(vals1, vals2):
-    """Two-sided p for vals1 vs vals2 per STAT_TEST; nan when not computable.
-
-    nan rather than None so callers doing `min(p * n, 1.0)` stay safe.
-    """
+    """Two-sided p for vals1 vs vals2 using STAT_TEST; nan if not computable."""
     a = np.asarray(vals1, dtype=float)
     b = np.asarray(vals2, dtype=float)
     if len(a) < 2 or len(b) < 2:
@@ -66,7 +54,7 @@ def paired_test(vals1, vals2):
         return float('nan')
 
 
-# Argument parsing
+# Arguments
 parser = argparse.ArgumentParser(description='Horizontal bar chart: All Meds vs Single Med comparison')
 parser.add_argument('--dataset', type=str, default='MSK',
                     help='Dataset name (default: MSK)')
@@ -80,21 +68,30 @@ parser.add_argument('--stat_test', type=str, default='wilcoxon',
                          "to reproduce the old figures. A non-default choice is appended to the "
                          "output filename.")
 parser.add_argument('--save_dir', type=str, default=None,
-                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without overwriting the existing ones.')
+parser.add_argument('--csv_dir', type=str, default=None,
+                    help='directory holding the design-choice CSVs; overrides the default results folder')
+parser.add_argument('-am', '--auroc_mode', type=str, default='weighted', choices=['weighted', 'overall'],
+                    help="AUROC panel: 'weighted' (default; per-infusion-group AUROC weighted by group "
+                         "size) or 'overall' (one AUROC pooled over the valid groups). The C-index panel "
+                         "is unchanged. 'overall' adds _overallauroc to the figure and summary names.")
 args = parser.parse_args()
+AUROC_COL = f'test_auroc_nextinf_{args.auroc_mode}'
+AUROC_LABEL = 'Weighted AUROC' if args.auroc_mode == 'weighted' else 'Overall AUROC'
+AM_SUFFIX = '_overallauroc' if args.auroc_mode == 'overall' else ''
 STAT_TEST = args.stat_test
 
 dataset = args.dataset
 modules = args.modules
 
 # Configuration
-all_model_path = sparc_paths.SPARC_MODEL_ROOT
-results_subfolder = 'results_vis_060726'
-csv_dir = f'{all_model_path}/{results_subfolder}/design_choices_2_all_vs_singlemeds'
+# --csv_dir overrides the results tree
+_arg_csv_dir = getattr(args, 'csv_dir', None)
+csv_dir = _arg_csv_dir if _arg_csv_dir else f'{sparc_paths.SPARC_RESULTS_VIS_ROOT}/design_choices_2_all_vs_singlemeds'
 save_dir = args.save_dir if args.save_dir else csv_dir
 os.makedirs(save_dir, exist_ok=True)
 
-# Define the 5 side effect tasks
+# Side-effect tasks
 SIDE_EFFECT_TASKS = ['AKI', 'Liver_toxicity', 'febrile_neutropenia', 'anemia', 'neutropenia']
 
 TASK_DISPLAY = {
@@ -105,10 +102,10 @@ TASK_DISPLAY = {
     'neutropenia': 'Neutropenia',
 }
 
-# Color scheme
+# Colours
 MODEL_COLORS = {
-    'All Meds': '#3B4992',      # Royal blue (highlighted)
-    'Single Med': '#AAAAAA',    # Gray
+    'All Meds': '#3B4992',
+    'Single Med': '#AAAAAA',
 }
 
 MODEL_HATCHES = {
@@ -118,7 +115,7 @@ MODEL_HATCHES = {
 
 # Helper functions
 def extract_medication(model_name):
-    """Extract medication name from model name"""
+    """'all_meds_on_X' / 'single_med_X' -> X."""
     if model_name == 'all_meds':
         return 'all_meds'
     elif model_name.startswith('all_meds_on_'):
@@ -129,7 +126,6 @@ def extract_medication(model_name):
         return model_name
 
 def extract_model_type(model_name):
-    """Extract model type (All Meds or Single Med)"""
     if model_name == 'all_meds' or model_name.startswith('all_meds_on_'):
         return 'All Meds'
     elif model_name.startswith('single_med_'):
@@ -137,8 +133,8 @@ def extract_model_type(model_name):
     else:
         return 'Unknown'
 
-# Process each task
-# Accumulate cleaned per-task frames for the combined data-summary export.
+# Per task
+# cleaned per-task frames for the combined data summary
 _summary_frames = []
 
 for task in SIDE_EFFECT_TASKS:
@@ -155,30 +151,25 @@ for task in SIDE_EFFECT_TASKS:
         print(f"Skipping {task}...")
         continue
 
-    # Extract medication and model type
     df['medication'] = df['model'].apply(extract_medication)
     df['model_type'] = df['model'].apply(extract_model_type)
 
-    # Filter out rows with missing data
-    df = df.dropna(subset=['test_auroc_nextinf_weighted', 'test_cindex_weighted'])
+    df = df.dropna(subset=[AUROC_COL, 'test_cindex_weighted'])
 
-    # Convert to percentage
-    df['auroc_pct'] = df['test_auroc_nextinf_weighted'] * 100
+    df['auroc_pct'] = df[AUROC_COL] * 100
     df['cindex_pct'] = df['test_cindex_weighted'] * 100
 
-    # Stash a copy for the combined data-summary export (tagged with task).
     _task_summary = df.copy()
     _task_summary.insert(0, 'task_display', TASK_DISPLAY.get(task, task))
     _task_summary.insert(0, 'task', task)
     _summary_frames.append(_task_summary)
 
-    # Get medication info
     medications_set = set(df['medication'].unique())
     if len(medications_set) == 0:
         print(f"No valid medications found for {task}")
         continue
 
-    # Calculate medication info (positive samples, total samples, ratio)
+    # (n_pos, n_total, pos_ratio) per med
     med_info = {}
     for med in medications_set:
         med_df = df[df['medication'] == med]
@@ -188,7 +179,7 @@ for task in SIDE_EFFECT_TASKS:
             pos_ratio = num_pos / num_total if num_total > 0 else 0
             med_info[med] = (num_pos, num_total, pos_ratio)
 
-    # Filter out medications with 0 positive samples (except all_meds)
+    # drop meds with no positives (keep all_meds)
     medications_filtered = []
     for med in medications_set:
         if med == 'all_meds':
@@ -203,7 +194,7 @@ for task in SIDE_EFFECT_TASKS:
         print(f"No medications with positive samples for {task}")
         continue
 
-    # Sort medications: 'all_meds' first, then by positive ratio (ascending)
+    # all_meds first, then by ascending positive ratio
     medications = []
     if 'all_meds' in medications_filtered:
         medications.append('all_meds')
@@ -211,52 +202,47 @@ for task in SIDE_EFFECT_TASKS:
     else:
         other_meds = medications_filtered
 
-    # Sort other medications by positive ratio
     other_meds_sorted = sorted(other_meds, key=lambda x: med_info[x][2] if x in med_info else 0)
     medications.extend(other_meds_sorted)
 
     print(f"Found {len(medications)} medications: {medications}")
     print(f"Positive ratios: {[(med, f'{med_info[med][2]*100:.1f}%') for med in medications if med in med_info]}")
 
-    # Create horizontal bar chart
     n_meds = len(medications)
     bar_height = 0.35
     med_gap = 0.15
 
-    # Create figure with two subplots (AUROC on left, C-index on right)
+    # AUROC left, C-index right
     fig_width = 16
     fig_height = max(6, n_meds * 0.8)
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, fig_height), sharey=True)
 
     ax_auroc, ax_cindex = axes
 
-    # Build y-axis positions
+    # y positions
     y_positions = {}  # {(med, model_type): y_pos}
     med_centers = {}  # {med: center_y}
 
     current_y = 0
-    for med in reversed(medications):  # Reverse so first med is at top
-        # For 'all_meds', only show 'All Meds' model
+    for med in reversed(medications):  # first med at the top
+        # all_meds has only the All Meds bar
         if med == 'all_meds':
             models_to_plot = ['All Meds']
         else:
             models_to_plot = ['All Meds', 'Single Med']
 
-        # Calculate positions for this medication's bars
         med_y_positions = []
         for i, model_type in enumerate(models_to_plot):
-            # Reverse position so first model (All Meds) is on top
+            # All Meds on top
             y_pos = current_y + (len(models_to_plot) - 1 - i) * bar_height
             y_positions[(med, model_type)] = y_pos
             med_y_positions.append(y_pos)
 
-        # Store center position for medication label
         med_centers[med] = np.mean(med_y_positions)
 
-        # Move to next medication group
         current_y += len(models_to_plot) * bar_height + med_gap
 
-    # Plot AUROC (left subplot)
+    # AUROC
     for med in medications:
         med_df = df[df['medication'] == med]
 
@@ -275,12 +261,11 @@ for task in SIDE_EFFECT_TASKS:
                 color = MODEL_COLORS[model_type]
                 hatch = MODEL_HATCHES[model_type]
 
-                # Plot bar
                 ax_auroc.barh(y_pos, mean_val, height=bar_height, xerr=std_val,
                             color=color, edgecolor='black', linewidth=1.2,
                             error_kw={'elinewidth': 1.2, 'capsize': 3, 'capthick': 1.2})
 
-    # Statistical testing for AUROC
+    # AUROC tests
     print(f"\nAUROC Statistical Tests:")
     for med in medications:
         if med == 'all_meds':
@@ -298,7 +283,6 @@ for task in SIDE_EFFECT_TASKS:
                   f"Single={np.mean(single_med_vals):.2f}±{np.std(single_med_vals):.2f}, "
                   f"p={p_val:.4f} → {sig_txt}")
 
-            # Add significance bracket
             y1 = y_positions[(med, 'All Meds')]
             y2 = y_positions[(med, 'Single Med')]
 
@@ -315,7 +299,7 @@ for task in SIDE_EFFECT_TASKS:
                          ha='left', va='center', fontsize=9,
                          alpha=0.6 if sig_txt == 'NS' else 1.0)
 
-    # Plot C-index (right subplot)
+    # C-index
     for med in medications:
         med_df = df[df['medication'] == med]
 
@@ -334,12 +318,11 @@ for task in SIDE_EFFECT_TASKS:
                 color = MODEL_COLORS[model_type]
                 hatch = MODEL_HATCHES[model_type]
 
-                # Plot bar
                 ax_cindex.barh(y_pos, mean_val, height=bar_height, xerr=std_val,
                              color=color, edgecolor='black', linewidth=1.2,
                              error_kw={'elinewidth': 1.2, 'capsize': 3, 'capthick': 1.2})
 
-    # Statistical testing for C-index
+    # C-index tests
     print(f"\nC-index Statistical Tests:")
     for med in medications:
         if med == 'all_meds':
@@ -357,7 +340,6 @@ for task in SIDE_EFFECT_TASKS:
                   f"Single={np.mean(single_med_vals):.2f}±{np.std(single_med_vals):.2f}, "
                   f"p={p_val:.4f} → {sig_txt}")
 
-            # Add significance bracket
             y1 = y_positions[(med, 'All Meds')]
             y2 = y_positions[(med, 'Single Med')]
 
@@ -374,8 +356,7 @@ for task in SIDE_EFFECT_TASKS:
                           ha='left', va='center', fontsize=9,
                           alpha=0.6 if sig_txt == 'NS' else 1.0)
 
-    # Format axes
-    # Y-axis labels (medication names with sample info)
+    # y labels: medication with sample counts
     y_ticks = [med_centers[med] for med in reversed(medications)]
     y_labels = []
     for med in reversed(medications):
@@ -389,30 +370,24 @@ for task in SIDE_EFFECT_TASKS:
     ax_auroc.set_yticks(y_ticks)
     ax_auroc.set_yticklabels(y_labels, fontsize=9)
 
-    # X-axis labels
-    ax_auroc.set_xlabel('Weighted AUROC (%)', fontsize=12, fontweight='bold')
+    ax_auroc.set_xlabel(f'{AUROC_LABEL} (%)', fontsize=12, fontweight='bold')
     ax_cindex.set_xlabel('Weighted C-index (%)', fontsize=12, fontweight='bold')
 
-    # X-axis limits
     ax_auroc.set_xlim(left=50, right=105)
     ax_cindex.set_xlim(left=50, right=105)
 
-    # Titles
-    ax_auroc.set_title('Weighted AUROC', fontsize=12, fontweight='bold', pad=10)
+    ax_auroc.set_title(AUROC_LABEL, fontsize=12, fontweight='bold', pad=10)
     ax_cindex.set_title('Weighted C-index', fontsize=12, fontweight='bold', pad=10)
 
-    # Grid and spines
     for ax in [ax_auroc, ax_cindex]:
         ax.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.3)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
 
-    # Overall title
     dataset_display = dataset.replace('_', '-')
     fig.suptitle(f'All Meds vs Single Med — {TASK_DISPLAY[task]} — {dataset_display}',
                 fontsize=14, fontweight='bold', y=0.98)
 
-    # Legend
     legend_elements = [
         Rectangle((0, 0), 1, 1, facecolor=MODEL_COLORS['All Meds'], edgecolor='black',
                  label='All Meds (trained on all medications)', linewidth=1.2),
@@ -424,10 +399,9 @@ for task in SIDE_EFFECT_TASKS:
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-    # Save figure
     test_suffix = '_' + STAT_TEST if STAT_TEST != 'wilcoxon' else ''
-    output_pdf = f'{save_dir}/all_vs_singlemeds_{task}_{dataset}{test_suffix}_bar_horizontal.pdf'
-    output_png = f'{save_dir}/all_vs_singlemeds_{task}_{dataset}{test_suffix}_bar_horizontal.png'
+    output_pdf = f'{save_dir}/all_vs_singlemeds_{task}_{dataset}{test_suffix}{AM_SUFFIX}_bar_horizontal.pdf'
+    output_png = f'{save_dir}/all_vs_singlemeds_{task}_{dataset}{test_suffix}{AM_SUFFIX}_bar_horizontal.png'
 
     fig.savefig(output_pdf, bbox_inches='tight')
     fig.savefig(output_png, bbox_inches='tight', dpi=150)
@@ -437,15 +411,15 @@ for task in SIDE_EFFECT_TASKS:
     print(f"  {output_pdf}")
     print(f"  {output_png}")
 
-# Data summary export (aggregate all per-task CSVs into one)
+# Combined data summary
 if _summary_frames:
     combined = pd.concat(_summary_frames, ignore_index=True)
 
-    # Long form: one row per (task, model, metric, fold), in the plotted units (%).
+    # long form: one row per (task, model, metric, fold), in %
     id_cols = [c for c in ['task', 'task_display', 'model', 'medication',
                            'model_type', 'val_fold'] if c in combined.columns]
     long_parts = []
-    for metric_name, pct_col in [('weighted_auroc', 'auroc_pct'),
+    for metric_name, pct_col in [(f'{args.auroc_mode}_auroc', 'auroc_pct'),
                                  ('weighted_cindex', 'cindex_pct')]:
         if pct_col in combined.columns:
             part = combined[id_cols].copy()
@@ -454,7 +428,7 @@ if _summary_frames:
             long_parts.append(part)
     summary_long = pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame()
 
-    # Wide roll-up: mean/std/n across folds per (task, model, metric).
+    # mean/std/n across folds per (task, model, metric)
     group_cols = [c for c in ['task', 'task_display', 'model', 'medication',
                               'model_type', 'metric'] if c in summary_long.columns]
     if not summary_long.empty:
@@ -466,12 +440,12 @@ if _summary_frames:
     else:
         summary_wide = pd.DataFrame()
 
-    long_path = f'{save_dir}/allmeds_vs_singlemeds_{modules}_{dataset}_summary_long.csv'
-    wide_path = f'{save_dir}/allmeds_vs_singlemeds_{modules}_{dataset}_summary_wide.csv'
+    long_path = f'{save_dir}/allmeds_vs_singlemeds_{modules}_{dataset}{AM_SUFFIX}_summary_long.csv'
+    wide_path = f'{save_dir}/allmeds_vs_singlemeds_{modules}_{dataset}{AM_SUFFIX}_summary_wide.csv'
     summary_long.to_csv(long_path, index=False)
     summary_wide.to_csv(wide_path, index=False)
     print("\n" + "="*70)
-    print("DATA SUMMARY EXPORT — design_choice_2_allmeds_vs_singlemeds")
+    print("DATA SUMMARY EXPORT: design_choice_2_allmeds_vs_singlemeds")
     print("="*70)
     print(f"  tasks: {combined['task'].nunique()}, rows(long): {len(summary_long)}")
     print(f"  long: {long_path}")

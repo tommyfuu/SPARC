@@ -1,15 +1,8 @@
-"""
-Loss-function comparison (vanilla / hybrid / cox) across the 5 side-effect tasks.
+"""Loss-function comparison (vanilla / hybrid / cox) across the 5 side-effect tasks.
 
-Two figures, one per metric: weighted AUROC and weighted C-index. Bars are mean
-+/- std over folds, with Bonferroni-corrected significance across tasks (--stat_test, default
-paired Wilcoxon signed-rank).
-
-Reads the CSVs from design_choice_comparison_1_reg_risk_loss.py.
-
-Usage:
-    python vis_design_choice_1_reg_risk_loss_horizontal_succinct.py
-    python vis_design_choice_1_reg_risk_loss_horizontal_succinct.py /path/to/design_choices_1_regvscox
+Weighted AUROC and weighted C-index figures: mean +/- std over folds, Bonferroni-corrected
+paired tests (--stat_test). Input: CSVs from design_choice_comparison_1_reg_risk_loss.py.
+Usage: python vis_design_choice_1_reg_risk_loss_horizontal_succinct.py [CSV_DIR]
 """
 
 import os
@@ -29,15 +22,10 @@ from matplotlib.patches import Rectangle
 from scipy.stats import wilcoxon, ttest_rel, mannwhitneyu, ttest_ind
 
 
-# Both arms are scored on the same folds, so the comparison is paired; earlier
-# versions of this script used an unpaired test. At n=10 the smallest attainable
-# two-sided p is 0.00195, so the strongest comparisons all pin there -- read the
-# deltas, not the star tiers. The old unpaired tests stay selectable via -st.
+# Paired: both arms use the same folds. At n=10 the smallest two-sided Wilcoxon p
+# is 0.00195, so strong effects all pin there; read the deltas, not the stars.
 def paired_test(vals1, vals2):
-    """Two-sided p for vals1 vs vals2 per STAT_TEST; nan when not computable.
-
-    nan rather than None so callers doing `min(p * n, 1.0)` stay safe.
-    """
+    """Two-sided p per STAT_TEST; nan (not None) when not computable."""
     a = np.asarray(vals1, dtype=float)
     b = np.asarray(vals2, dtype=float)
     if len(a) < 2 or len(b) < 2:
@@ -57,7 +45,6 @@ def paired_test(vals1, vals2):
         return float('nan')
 
 
-# Argument parsing
 parser = argparse.ArgumentParser(description='Succinct horizontal bar chart: loss function comparison')
 parser.add_argument('--dataset', type=str, default='MSK',
                     help='Dataset name (default: MSK)')
@@ -69,7 +56,7 @@ parser.add_argument('csv_dir_pos', nargs='?', default=None, metavar='CSV_DIR',
 parser.add_argument('--model_path', type=str, default=None,
                     help='Root holding the results_vis_* trees. Defaults to '
                          '$SPARC_MODEL_PATH, else the path in DEFAULT_MODEL_PATH.')
-parser.add_argument('--results_subdir', type=str, default='results_vis_060726',
+parser.add_argument('--results_subdir', type=str, default='results_vis_eval1_bfTrue',
                     help='Which results tree under --model_path to read '
                          '(default: %(default)s). Use e.g. '
                          'results_vis_060726_batch_091426 for a batch rerun.')
@@ -88,6 +75,10 @@ parser.add_argument('--stat_test', type=str, default='wilcoxon',
                          "'ttest_ind' are the UNPAIRED tests this script used previously, kept "
                          "to reproduce the old figures. A non-default choice is appended to the "
                          "output filename.")
+parser.add_argument('-am', '--auroc_mode', type=str, default='weighted', choices=['weighted', 'overall'],
+                    help="Side-effect AUROC: 'weighted' (default; per-infusion-group AUROC weighted by "
+                         "group size) or 'overall' (one AUROC pooled over the valid groups). 'overall' "
+                         "draws only the AUROC figure, with _overallauroc in its filename and summary.")
 args = parser.parse_args()
 STAT_TEST = args.stat_test
 
@@ -95,18 +86,12 @@ dataset = args.dataset
 modules = args.modules
 
 # Configuration
-# Root holding the results_vis_* trees. The original hardcoded value pointed at
-# /data/morrisq (the old lilac mount); on hosts that mount it elsewhere set
-# --model_path or the SPARC_MODEL_PATH environment variable.
-DEFAULT_MODEL_PATH = '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726'
+DEFAULT_MODEL_PATH = '/data1/morrisq/fuc/SPARC_CAIA_092426'   # bf=True tree
 
-all_model_path = (args.model_path
-                  or os.environ.get('SPARC_MODEL_PATH')
-                  or DEFAULT_MODEL_PATH)
+# SPARC_MODEL_PATH is not read here: sparc_paths uses that name for MODEL_ROOT.
+all_model_path = args.model_path or DEFAULT_MODEL_PATH
 
-# The positional argument and --csv_dir both win outright; otherwise assemble the
-# path from its parts so a batch rerun can be plotted by passing only
-# --results_subdir.
+# CSV_DIR / --csv_dir win; otherwise build the path from its parts.
 default_csv_dir = os.path.join(all_model_path, args.results_subdir, args.design_subdir)
 csv_dir = args.csv_dir_pos or args.csv_dir or default_csv_dir
 save_dir = args.save_dir if args.save_dir else csv_dir
@@ -123,7 +108,7 @@ os.makedirs(save_dir, exist_ok=True)
 print(f"Reading CSVs from : {csv_dir}")
 print(f"Writing output to : {save_dir}")
 
-# Define the 5 side effect tasks
+# the 5 side-effect tasks
 SIDE_EFFECT_TASKS = ['AKI', 'Liver_toxicity', 'febrile_neutropenia', 'anemia', 'neutropenia']
 
 TASK_DISPLAY = {
@@ -134,7 +119,6 @@ TASK_DISPLAY = {
     'neutropenia': 'Neutropenia',
 }
 
-# Define models to compare
 LOSS_MODELS = ['SPARC_vanilla', 'SPARC_hybrid', 'SPARC_cox']
 
 LOSS_DISPLAY = {
@@ -143,35 +127,24 @@ LOSS_DISPLAY = {
     'SPARC_cox': 'Cox Loss'
 }
 
-# Encoding: fill = loss function, contour weight = chosen model
-# Loss functions form an ordered progression (pure BCE -> BCE+Cox -> pure Cox),
-# so they are drawn as one blue ramp light->dark rather than as unrelated hues.
-# Steps 250/450/650 of the sequential blue; validated as an ordinal ramp
-# (monotone lightness, adjacent dL >= 0.06, light end 2.06:1 on the surface).
-#
-# A model's colour is keyed to the model, not to its position in the group.
+# Fill = loss function (ordered, so one light->dark blue ramp); heavy contour = chosen model.
 LOSS_COLOR = {
     'SPARC_vanilla': '#86b6ef',   # blue 250 - lightest
     'SPARC_hybrid':  '#2a78d6',   # blue 450
     'SPARC_cox':     '#104281',   # blue 650 - darkest
 }
 
-# The chosen model for a task is marked by a heavy contour instead of a separate
-# fill colour. The contour reads against the white background at the bar's outer
-# edge, so it stays legible even on the darkest step.
 CHOSEN_EDGE_COLOR = '#0b0b0b'      # text-primary ink
 CHOSEN_EDGE_WIDTH = 2.6
 PLAIN_EDGE_COLOR = '#52514e'       # text-secondary ink
 PLAIN_EDGE_WIDTH = 0.7
 
-# Task-specific choice:
-# AKI and Liver_toxicity: Cox Loss is chosen
-# febrile_neutropenia, anemia, neutropenia: Hybrid Loss is chosen
+# Chosen loss: Cox for AKI and liver injury, hybrid for the heme tasks.
 def get_chosen_model(task):
     """Which loss function is the chosen one for this task"""
     if task in ['AKI', 'Liver_toxicity']:
         return 'SPARC_cox'
-    else:  # febrile_neutropenia, anemia, neutropenia
+    else:
         return 'SPARC_hybrid'
 
 def get_bar_style(task, model):
@@ -209,12 +182,12 @@ build_design_choice_summary(
     task_data=task_data,
     available_tasks=available_tasks,
     models=LOSS_MODELS,
-    metrics={
+    metrics=({
         'weighted_auroc': 'test_auroc_nextinf_weighted',
         'weighted_cindex': 'test_cindex_weighted',
-    },
+    } if args.auroc_mode == 'weighted' else {'overall_auroc': 'test_auroc_nextinf_overall'}),
     save_dir=save_dir,
-    out_stem=f'loss_comparison_{modules}_{dataset}',
+    out_stem=f'loss_comparison_{modules}_{dataset}' + ('_overallauroc' if args.auroc_mode == 'overall' else ''),
     task_display=TASK_DISPLAY,
     model_display=LOSS_DISPLAY,
     to_percent=True,
@@ -222,12 +195,10 @@ build_design_choice_summary(
 )
 
 # Bonferroni-corrected significance thresholds
-# α = 0.05 / n_tasks
 alpha = 0.05
 alpha_corr = alpha / n_tasks
 print(f"Bonferroni-corrected α = {alpha}/{n_tasks} = {alpha_corr:.4f}\n")
 
-# Helper functions
 def get_vals(task, model_key, metric_col):
     """Get fold-level metric values for a model on a task"""
     df = task_data.get(task)
@@ -238,16 +209,13 @@ def get_vals(task, model_key, metric_col):
         return np.array([])
     return rows[metric_col].dropna().values * 100   # → percent
 
-# Create figure function for each metric
 def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
-    """Create a horizontal bar chart for a specific metric"""
+    """Grouped horizontal bars for one metric, with significance brackets."""
 
     n_models = len(LOSS_MODELS)
-    bar_pitch = 0.45   # Centre-to-centre spacing of bars within a task
-    bar_height = 0.38  # Drawn thickness; the shortfall is the gap between bars,
-                       # which separates the fills so the heavy contour on the
-                       # chosen bar reads even on the darkest blue step
-    task_gap = 0.2     # Minimal gap between task groups
+    bar_pitch = 0.45   # centre-to-centre spacing of bars within a task
+    bar_height = 0.38  # < pitch; the gap keeps the chosen-bar contour visible
+    task_gap = 0.2     # gap between task groups
 
     # Build y-axis positions
     y_positions = {}  # {(task, model): y_pos}
@@ -255,21 +223,17 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
 
     current_y = 0
     for task in reversed(available_tasks):  # Reverse so first task is at top
-        # Calculate positions for this task's bars
         task_y_positions = []
         for i, model in enumerate(LOSS_MODELS):
-            # Reverse position so first model (Vanilla) is on top
+            # first model (Vanilla) on top
             y_pos = current_y + (n_models - 1 - i) * bar_pitch
             y_positions[(task, model)] = y_pos
             task_y_positions.append(y_pos)
 
-        # Store center position for task label
         task_centers[task] = np.mean(task_y_positions)
 
-        # Move to next task group
         current_y += n_models * bar_pitch + task_gap
 
-    # Create figure
     fig_height = max(6, n_tasks * 1.2)  # Compact vertical layout
     fig_width = 10
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -284,7 +248,6 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
                 y_pos = y_positions[(task, model)]
                 color, edge_color, edge_width = get_bar_style(task, model)
 
-                # Plot bar
                 ax.barh(y_pos, mean_val, height=bar_height, xerr=std_val,
                        color=color, edgecolor=edge_color, linewidth=edge_width,
                        zorder=2,
@@ -296,8 +259,7 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
     print(f"SIGNIFICANCE TESTING - {metric_name}")
     print("="*70)
 
-    # Determine which comparisons to make
-    # Three-way: Vanilla vs Hybrid, Hybrid vs Cox, Vanilla vs Cox
+    # (model1, model2, bracket x offset, star x offset)
     comparisons = [
         ('SPARC_vanilla', 'SPARC_hybrid', 1.5, 0.5),
         ('SPARC_hybrid', 'SPARC_cox', 4.5, 0.5),
@@ -313,7 +275,6 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
                 p_raw = paired_test(vals1, vals2)
                 p_corrected = min(p_raw * n_tasks, 1.0)
 
-                # Determine significance level
                 if p_corrected < alpha:
                     star = '***' if p_corrected < 0.001 else ('**' if p_corrected < 0.01 else '*')
                 else:
@@ -322,24 +283,20 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
                 print(f"  {TASK_DISPLAY[task]:25s} {LOSS_DISPLAY[model1]:15s} vs {LOSS_DISPLAY[model2]:15s}: "
                       f"p_raw={p_raw:.4f}, p_Bonf={p_corrected:.4f} → {star}")
 
-                # Get bar positions
                 y1 = y_positions[(task, model1)]
                 y2 = y_positions[(task, model2)]
 
-                # Calculate x position for bracket (to the right of the longer bar)
+                # bracket sits right of the longer bar
                 mean1 = np.mean(vals1)
                 std1 = np.std(vals1)
                 mean2 = np.mean(vals2)
                 std2 = np.std(vals2)
 
-                # Use offset to avoid overlapping lines
                 x_right = max(mean1 + std1, mean2 + std2) + x_offset
 
-                # Draw vertical line connecting the two bars
                 ax.plot([x_right, x_right], [y1, y2], 'k-', linewidth=1,
                        alpha=0.5 if star == 'NS' else 1.0)
 
-                # Add significance text
                 y_mid = (y1 + y2) / 2
                 ax.text(x_right + text_offset, y_mid, star,
                        ha='left', va='center', fontsize=9,
@@ -347,18 +304,16 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
 
     print("="*70 + "\n")
 
-    # Set y-axis labels (task names)
+    # y-axis labels (task names)
     y_ticks = [task_centers[task] for task in reversed(available_tasks)]
     y_labels = [TASK_DISPLAY[task] for task in reversed(available_tasks)]
     ax.set_yticks(y_ticks)
     ax.set_yticklabels(y_labels, fontsize=11)
 
-    # Set x-axis
     ax.set_xlabel(f'{metric_name} (%)', fontsize=12, fontweight='bold')
     x_max = 108  # Room for the three significance brackets
     ax.set_xlim(left=50, right=x_max)
 
-    # Title
     dataset_display = dataset.replace('_', '-')
     title_text = f'Loss Function Comparison — {metric_name} — {dataset_display}'
     ax.set_title(title_text, fontsize=13, fontweight='bold', pad=15)
@@ -368,9 +323,7 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Legend: one swatch per loss function, plus the contour convention.
-    # Placed below the axes - the bars run the full width, so any in-axes
-    # position covers data or the significance brackets.
+    # Legend below the axes: inside, it would cover bars or brackets.
     legend_elements = [
         Rectangle((0, 0), 1, 1, facecolor=LOSS_COLOR[m], edgecolor=PLAIN_EDGE_COLOR,
                   linewidth=PLAIN_EDGE_WIDTH, label=LOSS_DISPLAY[m])
@@ -388,7 +341,6 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
 
     plt.tight_layout()
 
-    # Save figure
     test_suffix = '_' + STAT_TEST if STAT_TEST != 'wilcoxon' else ''
     out_pdf = f'{save_dir}/loss_comparison_{metric_suffix}_{modules}_{dataset}{test_suffix}_horizontal_succinct.pdf'
     out_png = f'{save_dir}/loss_comparison_{metric_suffix}_{modules}_{dataset}{test_suffix}_horizontal_succinct.png'
@@ -403,10 +355,11 @@ def create_horizontal_barchart(metric_col, metric_name, metric_suffix):
 
 # Create both figures (AUROC and C-index)
 
-# Create AUROC figure
-create_horizontal_barchart('test_auroc_nextinf_weighted', 'Weighted AUROC', 'auroc')
+if args.auroc_mode == 'overall':
+    create_horizontal_barchart('test_auroc_nextinf_overall', 'Overall AUROC', 'overallauroc')
+else:
+    create_horizontal_barchart('test_auroc_nextinf_weighted', 'Weighted AUROC', 'auroc')
 
-# Create C-index figure
-create_horizontal_barchart('test_cindex_weighted', 'Weighted C-index', 'cindex')
+    create_horizontal_barchart('test_cindex_weighted', 'Weighted C-index', 'cindex')
 
 print("Done.")
