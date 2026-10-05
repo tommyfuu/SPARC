@@ -1,12 +1,7 @@
-"""Directly-supervised vs pretrained-then-finetuned SPARC across training-data
-fractions, one panel per task.
+"""Directly-supervised vs pretrained-then-finetuned SPARC across training-data fractions.
 
-Plots absolute performance each task with
-a Spearman rho and p-value quantifying whether the pretraining benefit shrinks
-as training data grows. Side-effect tasks use test_auroc_nextinf_weighted,
-binary tasks use test_auroc. Fractions are equally spaced.
-
-Reads the CSVs from eval_4_titration_compare_all_fractions.py.
+One panel per task (AUROC, mean and 95% CI over folds), titled with the Spearman rho between
+fraction and relative pretraining benefit. Reads the CSVs from eval_4_titration_compare_all_fractions.py.
 """
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
@@ -27,13 +22,13 @@ import numpy as np
 from pathlib import Path
 from scipy import stats
 
-# Set font to Arial
+# Fonts
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 matplotlib.rcParams['font.family'] = 'sans-serif'
 matplotlib.rcParams['font.sans-serif'] = ['Arial', 'Liberation Sans', 'DejaVu Sans']
 
-# Set style
+# Style
 sns.set_style("whitegrid")
 plt.rcParams['font.size'] = 12
 plt.rcParams['axes.labelsize'] = 14
@@ -44,19 +39,27 @@ plt.rcParams['figure.dpi'] = 300
 # Paths
 model_path = sparc_paths.SPARC_MODEL_ROOT
 results_path = f'{model_path}/results_vis_060726'
-csv_dir = f'{results_path}/eval_trainsize'
+csv_dir = sparc_paths.SPARC_TITRATION_RESULTS_DIR
 import argparse
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--save_dir', type=str, default=None,
-                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without touching the published ones.')
+                    help='Override the output directory (default: alongside the input CSVs). Use it to regenerate figures without overwriting the existing ones.')
+parser.add_argument('--csv_dir', type=str, default=None,
+                    help='Override the input CSV directory (default: sparc_paths.SPARC_TITRATION_RESULTS_DIR).')
+parser.add_argument('-am', '--auroc_mode', type=str, default='weighted', choices=['weighted', 'overall'],
+                    help="Side-effect AUROC: 'weighted' (default) or 'overall'; binary tasks use auroc "
+                         "either way. 'overall' adds _overallauroc to the output filenames.")
 args = parser.parse_args()
+AM_SUFFIX = '_overallauroc' if args.auroc_mode == 'overall' else ''
+if args.csv_dir:
+    csv_dir = args.csv_dir
 
 save_dir = args.save_dir if args.save_dir else csv_dir
 Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-dataset = 'MSK_CAIA'  # Default dataset used in evaluation
+dataset = 'MSK_CAIA'
 
-# Task configurations
+# Tasks
 side_effect_tasks = {
     'febrile_neutropenia_risk': 'Febrile Neutropenia',
     'neutropenia_risk': 'Grade 3 Neutropenia',
@@ -69,15 +72,15 @@ binary_tasks = {
     'binary_icu_pre': '30D ICU mort.'
 }
 
-# Fraction ordering (smallest to largest)
+# Fractions, smallest to largest
 side_effect_fractions = ['1/256', '1/128', '1/64', '1/16', '1/4', '1/1']
 binary_fractions = ['1/256', '1/128', '1/64', '1/16', '1/4', '1/1']
 binary_icu_pre_fractions = ['1/256', '1/128', '1/64', '1/32', '1/16', '1/4', '1/1']
 
-# Color scheme
+# Colours
 colors = {
-    'SPARC': '#2E86AB',      # Blue
-    'SPARC-P': '#A23B72',    # Purple/Magenta
+    'SPARC': '#2E86AB',
+    'SPARC-P': '#A23B72',
 }
 
 markers = {
@@ -85,14 +88,13 @@ markers = {
     'SPARC-P': 's',
 }
 
-# Display labels for legend
+# Legend labels
 display_labels = {
     'SPARC': 'SPARC (directly supervised)',
     'SPARC-P': 'SPARC (pretrained-then-finetuned)'
 }
 
 def get_significance_stars(p_value):
-    """Convert p-value to significance stars."""
     if p_value < 0.001:
         return '***'
     elif p_value < 0.01:
@@ -103,16 +105,10 @@ def get_significance_stars(p_value):
         return 'ns'
 
 def compute_spearman_correlation(raw_values, fractions):
-    """
-    Compute Spearman correlation between training fraction and pretraining benefit.
+    """Spearman rho between training fraction and relative benefit of SPARC-P over SPARC.
 
-    A negative correlation indicates that pretraining benefit decreases as
-    training data increases (i.e., pretraining helps more with less data).
-
-    Returns:
-        dict: {'rho': correlation coefficient, 'p_value': p-value}
+    Negative rho = the benefit shrinks with more data. Returns {'rho', 'p_value'}.
     """
-    # Map fractions to numeric values
     fraction_numeric = {
         '1/256': 1/256,
         '1/128': 1/128,
@@ -137,7 +133,7 @@ def compute_spearman_correlation(raw_values, fractions):
             sparc_mean = sparc_vals.mean()
             sparc_p_mean = sparc_p_vals.mean()
 
-            # Calculate relative benefit: (SPARC-P - SPARC) / SPARC * 100
+            # relative benefit, % of SPARC
             if sparc_mean != 0:
                 benefit = ((sparc_p_mean - sparc_mean) / sparc_mean) * 100
             else:
@@ -146,7 +142,7 @@ def compute_spearman_correlation(raw_values, fractions):
             fraction_vals.append(fraction_numeric[fraction])
             benefit_vals.append(benefit)
 
-    # Need at least 3 points for correlation
+    # need at least 3 fractions
     if len(fraction_vals) >= 3:
         rho, p_value = stats.spearmanr(fraction_vals, benefit_vals)
         return {'rho': rho, 'p_value': p_value}
@@ -154,7 +150,7 @@ def compute_spearman_correlation(raw_values, fractions):
         return {'rho': np.nan, 'p_value': np.nan}
 
 def load_data_for_task(task, fractions):
-    """Load performance data for a specific task across all fractions with CIs."""
+    """Per-fraction mean and 95% t-CI per model, plus the raw fold values."""
     csv_path = f'{csv_dir}/trainsize_comparison_{task}_{dataset}_all_fractions.csv'
 
     try:
@@ -163,10 +159,9 @@ def load_data_for_task(task, fractions):
         print(f"Warning: File not found: {csv_path}")
         return pd.DataFrame(), {}
 
-    # Determine metric column
     if task in side_effect_tasks:
-        metric_col = 'test_auroc_nextinf_weighted'
-    else:  # binary tasks
+        metric_col = f'test_auroc_nextinf_{args.auroc_mode}'
+    else:
         metric_col = 'auroc'
 
     if metric_col not in df.columns:
@@ -174,10 +169,9 @@ def load_data_for_task(task, fractions):
         return pd.DataFrame(), {}
 
     data = []
-    raw_values = {}  # Store raw values for t-tests
+    raw_values = {}  # {fraction: {model: fold values}}
 
     for fraction in fractions:
-        # Filter for this fraction
         df_frac = df[df['data_fraction'] == fraction]
 
         if df_frac.empty:
@@ -185,7 +179,6 @@ def load_data_for_task(task, fractions):
 
         raw_values[fraction] = {}
 
-        # Get SPARC and SPARC-P values with confidence intervals
         for model_name, model_label in [('SPARC_direct', 'SPARC'), ('SPARC_finetuned', 'SPARC-P')]:
             model_rows = df_frac[df_frac['model'] == model_name]
             if not model_rows.empty:
@@ -194,7 +187,6 @@ def load_data_for_task(task, fractions):
 
                 if len(values) > 0:
                     mean_val = values.mean()
-                    # Calculate 95% confidence interval
                     if len(values) > 1:
                         ci = stats.t.interval(0.95, len(values)-1,
                                              loc=mean_val,
@@ -213,50 +205,9 @@ def load_data_for_task(task, fractions):
 
     return pd.DataFrame(data), raw_values
 
-def compute_significance(raw_values, fractions):
-    """
-    Compute pairwise t-tests between SPARC and SPARC-P at each fraction
-    with Bonferroni correction.
-
-    Returns:
-        dict: {fraction: {'p_value': p, 'p_corrected': p_corr, 'stars': stars}}
-    """
-    results = {}
-    n_tests = len(fractions)
-
-    for fraction in fractions:
-        if fraction not in raw_values:
-            continue
-
-        sparc_vals = raw_values[fraction].get('SPARC', np.array([]))
-        sparc_p_vals = raw_values[fraction].get('SPARC-P', np.array([]))
-
-        if len(sparc_vals) > 1 and len(sparc_p_vals) > 1:
-            # Perform paired or independent t-test
-            # Use independent t-test since these are different models
-            t_stat, p_value = stats.ttest_ind(sparc_vals, sparc_p_vals)
-
-            # Apply Bonferroni correction
-            p_corrected = min(p_value * n_tests, 1.0)
-
-            results[fraction] = {
-                'p_value': p_value,
-                'p_corrected': p_corrected,
-                'stars': get_significance_stars(p_corrected),
-                't_stat': t_stat
-            }
-        else:
-            results[fraction] = {
-                'p_value': np.nan,
-                'p_corrected': np.nan,
-                'stars': 'n/a',
-                't_stat': np.nan
-            }
-
-    return results
 
 def plot_task_performance(task, task_name, fractions, ax):
-    """Plot performance for a single task with Spearman correlation."""
+    """One task's lines with CI bands; Spearman rho in the title."""
     df, raw_values = load_data_for_task(task, fractions)
 
     if df.empty:
@@ -264,13 +215,11 @@ def plot_task_performance(task, task_name, fractions, ax):
                 ha='center', va='center', transform=ax.transAxes)
         return
 
-    # Compute Spearman correlation
     spearman_result = compute_spearman_correlation(raw_values, fractions)
 
-    # Create x-axis positions (equal spacing)
+    # equally spaced x
     x_positions = np.arange(len(fractions))
 
-    # Plot each model type
     for model_type in ['SPARC', 'SPARC-P']:
         model_data = df[df['model_type'] == model_type].copy()
         model_data['x_pos'] = model_data['fraction'].map(
@@ -278,35 +227,30 @@ def plot_task_performance(task, task_name, fractions, ax):
         )
         model_data = model_data.sort_values('x_pos')
 
-        # Plot line
         ax.plot(model_data['x_pos'], model_data['performance'],
                 color=colors[model_type], marker=markers[model_type],
                 label=display_labels[model_type], linewidth=2.5, markersize=8,
                 markeredgewidth=1.5, markeredgecolor='white')
 
-        # Add confidence interval shading
+        # CI band
         ax.fill_between(model_data['x_pos'],
                         model_data['ci_lower'],
                         model_data['ci_upper'],
                         color=colors[model_type],
                         alpha=0.2)
 
-    # Formatting
     ax.set_xlabel('Training Data Fraction', fontweight='bold')
-    ax.set_ylabel('AUROC', fontweight='bold')
+    ax.set_ylabel('AUROC' if args.auroc_mode == 'weighted' else 'AUROC (overall for side effects)', fontweight='bold')
 
-    # Create title with task name and Spearman correlation
     rho = spearman_result['rho']
     p_val = spearman_result['p_value']
 
     if not np.isnan(rho) and not np.isnan(p_val):
-        # Format p-value
         if p_val < 0.001:
             p_str = "p<0.001"
         else:
             p_str = f"p={p_val:.3f}"
 
-        # Add significance indicator
         sig_indicator = ""
         if p_val < 0.05:
             sig_indicator = " *"
@@ -325,59 +269,59 @@ def plot_task_performance(task, task_name, fractions, ax):
     ax.legend(loc='lower right', framealpha=0.95, fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Use custom y-axis limits based on data range
+    # y limits from the data
     all_values = df['performance'].values
     if len(all_values) > 0:
         y_min = all_values.min() - 0.02
-        y_max = min(1.0, all_values.max() + 0.05)  # Some padding for visibility
+        y_max = min(1.0, all_values.max() + 0.05)
         ax.set_ylim([y_min, y_max])
 
-    # Add horizontal line at 0.5 (random) if visible in range
+    # chance line, if in range
     y_lim = ax.get_ylim()
     if y_lim[0] <= 0.5 <= y_lim[1]:
         ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.5)
 
-# Create figure with subplots for all tasks
+# Figures
 print("Creating per-task line plots with significance testing...")
 
-# Side effect tasks (5 tasks)
+# Side-effect tasks
 fig, axes = plt.subplots(2, 3, figsize=(18, 12))
 axes = axes.flatten()
 
 for idx, (task, task_name) in enumerate(side_effect_tasks.items()):
     plot_task_performance(task, task_name, side_effect_fractions, axes[idx])
 
-# Hide the last subplot (we have 5 tasks but 6 subplots)
+# 5 tasks on a 2x3 grid
 axes[5].axis('off')
 
 plt.tight_layout()
-plt.savefig(f'{save_dir}/titration_side_effect_tasks_lineplot_with_significance.pdf', bbox_inches='tight', dpi=300)
-plt.savefig(f'{save_dir}/titration_side_effect_tasks_lineplot_with_significance.png', bbox_inches='tight', dpi=300)
-print(f"Saved: {save_dir}/titration_side_effect_tasks_lineplot_with_significance.pdf")
+plt.savefig(f'{save_dir}/titration_side_effect_tasks_lineplot_with_significance{AM_SUFFIX}.pdf', bbox_inches='tight', dpi=300)
+plt.savefig(f'{save_dir}/titration_side_effect_tasks_lineplot_with_significance{AM_SUFFIX}.png', bbox_inches='tight', dpi=300)
+print(f"Saved: {save_dir}/titration_side_effect_tasks_lineplot_with_significance{AM_SUFFIX}.pdf")
 plt.close()
 
-# Binary tasks (2 tasks - note binary_icu_pre has more fractions)
+# Binary tasks (binary_icu_pre also has 1/32)
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 plot_task_performance('binary', binary_tasks['binary'], binary_fractions, axes[0])
 plot_task_performance('binary_icu_pre', binary_tasks['binary_icu_pre'], binary_icu_pre_fractions, axes[1])
 
 plt.tight_layout()
-plt.savefig(f'{save_dir}/titration_binary_tasks_lineplot_with_significance.pdf', bbox_inches='tight', dpi=300)
-plt.savefig(f'{save_dir}/titration_binary_tasks_lineplot_with_significance.png', bbox_inches='tight', dpi=300)
-print(f"Saved: {save_dir}/titration_binary_tasks_lineplot_with_significance.pdf")
+plt.savefig(f'{save_dir}/titration_binary_tasks_lineplot_with_significance{AM_SUFFIX}.pdf', bbox_inches='tight', dpi=300)
+plt.savefig(f'{save_dir}/titration_binary_tasks_lineplot_with_significance{AM_SUFFIX}.png', bbox_inches='tight', dpi=300)
+print(f"Saved: {save_dir}/titration_binary_tasks_lineplot_with_significance{AM_SUFFIX}.pdf")
 plt.close()
 
-# Create combined figure with all tasks
+# All tasks in one figure
 print("Creating combined figure with all tasks...")
 fig = plt.figure(figsize=(20, 12))
 
-# Side effect tasks in top 2 rows
+# side-effect tasks in the top rows
 for idx, (task, task_name) in enumerate(side_effect_tasks.items()):
     ax = plt.subplot(3, 3, idx + 1)
     plot_task_performance(task, task_name, side_effect_fractions, ax)
 
-# Binary tasks in bottom row
+# binary tasks in the bottom row
 ax = plt.subplot(3, 3, 7)
 plot_task_performance('binary', binary_tasks['binary'], binary_fractions, ax)
 
@@ -385,12 +329,12 @@ ax = plt.subplot(3, 3, 8)
 plot_task_performance('binary_icu_pre', binary_tasks['binary_icu_pre'], binary_icu_pre_fractions, ax)
 
 plt.tight_layout()
-plt.savefig(f'{save_dir}/titration_all_tasks_lineplot_with_significance.pdf', bbox_inches='tight', dpi=300)
-plt.savefig(f'{save_dir}/titration_all_tasks_lineplot_with_significance.png', bbox_inches='tight', dpi=300)
-print(f"Saved: {save_dir}/titration_all_tasks_lineplot_with_significance.pdf")
+plt.savefig(f'{save_dir}/titration_all_tasks_lineplot_with_significance{AM_SUFFIX}.pdf', bbox_inches='tight', dpi=300)
+plt.savefig(f'{save_dir}/titration_all_tasks_lineplot_with_significance{AM_SUFFIX}.png', bbox_inches='tight', dpi=300)
+print(f"Saved: {save_dir}/titration_all_tasks_lineplot_with_significance{AM_SUFFIX}.pdf")
 plt.close()
 
-# Create a summary table of Spearman correlation results
+# Spearman summary table
 print("\n" + "="*100)
 print("SPEARMAN CORRELATION SUMMARY")
 print("="*100)
@@ -401,7 +345,6 @@ print(f"{'Task':<30} {'Spearman ρ':<15} {'p-value':<12} {'Significance':<15} {'
 print("-"*100)
 
 for task_key, task_name in {**side_effect_tasks, **binary_tasks}.items():
-    # Determine which fractions to use
     if task_key in side_effect_tasks:
         task = task_key
         fractions = side_effect_fractions
@@ -419,7 +362,6 @@ for task_key, task_name in {**side_effect_tasks, **binary_tasks}.items():
         p_val = spearman_result['p_value']
 
         if not np.isnan(rho) and not np.isnan(p_val):
-            # Determine significance
             if p_val < 0.001:
                 sig_str = "***"
             elif p_val < 0.01:
@@ -429,7 +371,6 @@ for task_key, task_name in {**side_effect_tasks, **binary_tasks}.items():
             else:
                 sig_str = "ns"
 
-            # Interpretation
             if rho < 0:
                 interp = "Benefit ↓ with more data"
             else:

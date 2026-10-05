@@ -1,22 +1,10 @@
-"""Model comparison across tasks: one subplot per task, one horizontal bar per model.
+"""Horizontal bar grid (one panel per task) of every model in the eval_1 CSVs.
 
-Models are discovered from each task's CSV rather than hard-coded, ranked by
-performance, with mean +/- std over folds and an optional ensemble diamond.
+-ci ensemble: ensemble value with its 95% bootstrap CI; -ci folds: fold mean +/- SD.
+Stars vs. SPARC-P from --stat_test (ttest_rel / wilcoxon over folds, bootstrap or DeLong on
+the ensemble predictions); --correction bonferroni is per task.
 
-Metric (--metric): weighted_auroc | overall_auroc | weighted_auprc | overall_auprc.
-Side-effect tasks read test_auroc_nextinf_* / test_auprc_nextinf_*; binary tasks
-read auroc / auprc.
-
-Significance (--stat_test) is against SPARC-P, paired across folds; ttest_rel by
-default, wilcoxon selectable, --correction bonferroni applies within each task.
-At n=10 the smallest attainable two-sided p is 0.00195, so the strongest
-comparisons all pin there -- read the effect size, not the stars.
-
-Reads the CSVs from eval_1_across_models_comparison_ensemble_FP_fixed.py.
-
-Usage:
-    python vis_eval_1_across_tasks_t1e_controlled_bar_horizontal_succinct_wilcoxon_all.py --dataset MSK_CAIA
-    python vis_eval_1_across_tasks_t1e_controlled_bar_horizontal_succinct_wilcoxon_all.py --metric weighted_auprc --stat_test wilcoxon
+Usage: python vis_eval_1_across_tasks_t1e_controlled_bar_horizontal_succinct_wilcoxon_all.py --dataset MSK_CAIA
 """
 
 import os
@@ -31,7 +19,6 @@ matplotlib.rcParams['font.sans-serif'] = ['Arial', 'Liberation Sans', 'DejaVu Sa
 import matplotlib.pyplot as plt
 from scipy import stats
 
-# Argument parsing
 parser = argparse.ArgumentParser(
     description='Per-task subplot grid: all models plotted horizontally (y-axis = models)')
 parser.add_argument('--dataset', type=str, default='MSK_CAIA',
@@ -48,6 +35,10 @@ parser.add_argument('--metric', type=str, default='weighted_auroc',
                      help="Metric to plot. 'weighted'/'overall' only differ for side-effect tasks "
                           "(binary tasks have a single AUROC/AUPRC column either way). "
                           "Default: weighted_auroc")
+parser.add_argument('-ci', '--ci', type=str, default='ensemble', choices=['ensemble', 'folds'],
+                    help="'ensemble' (default): bar = ensemble estimate, error bar = its 95%% bootstrap CI "
+                         "(no diamond). 'folds': bar = mean over folds, error bar = SD over folds, plus the "
+                         "ensemble diamond (original figure). Significance stars are the fold-paired tests in both.")
 parser.add_argument('--ensemble', dest='ensemble', action='store_true', default=True,
                      help='Show ensemble performance as red diamond markers (default: on)')
 parser.add_argument('--no-ensemble', dest='ensemble', action='store_false',
@@ -57,6 +48,14 @@ parser.add_argument('--highlight', type=str, default='',
                           "subplot. Default is '' (no highlight) — SPARC is no longer "
                           "emphasised by default so all models are drawn identically. "
                           "Use the internal model name, e.g. 'SPARC-P'.")
+parser.add_argument('--alpha', type=float, default=0.05,
+                     help="Threshold for a single star (default 0.05). ** and *** stay at p<0.01 / "
+                          "p<0.001. A non-default value adds _alpha<value> to the filename.")
+parser.add_argument('--style', type=str, default='default', choices=['default', 'simple'],
+                     help="'simple': SPARC (SPARC-P) keeps its colour and every other method is grey; "
+                          "methods are grouped time-series first, then last-timepoint, ordered by "
+                          "performance within each group (per --sort_by), with a thin rule between "
+                          "the groups. Adds _simple to the filename.")
 parser.add_argument('--sort_by', type=str, default='global', choices=['global', 'per_task'],
                      help="'global': models ranked once (by mean performance across all "
                           "available tasks) and that order is kept fixed in every subplot. "
@@ -67,7 +66,7 @@ parser.add_argument('--ncols', type=int, default=3,
 parser.add_argument('--model_path', type=str, default=None,
                      help='Root holding the results_vis_* trees. Defaults to '
                           '$SPARC_MODEL_PATH, else the path in DEFAULT_MODEL_PATH.')
-parser.add_argument('--results_subdir', type=str, default='results_vis_060726',
+parser.add_argument('--results_subdir', type=str, default='results_vis_eval1_bfTrue',
                      help='Which results tree under --model_path to read '
                           '(default: %(default)s). Use e.g. '
                           'results_vis_060726_batch_091426 for a batch rerun.')
@@ -85,7 +84,7 @@ parser.add_argument('--family_style', type=str, default='color',
                           "y-axis labels: 'color' (teal vs. amber text) or 'underline' "
                           "(black text, time-series labels underlined). Default: color")
 parser.add_argument('--stat_test', type=str, default='ttest_rel',
-                     choices=['ttest_rel', 'wilcoxon'],
+                     choices=['ttest_rel', 'wilcoxon', 'bootstrap', 'delong'],
                      help="Paired test for SPARC-P vs. each model. Both arms are scored on the "
                           "same CV folds, so the observations are paired either way; this only "
                           "chooses parametric vs. rank-based. "
@@ -99,7 +98,28 @@ parser.add_argument('--stat_test', type=str, default='ttest_rel',
                           "so one extreme fold AGREEING with the effect inflates the SD and shrinks t. "
                           "Cost: at n=10 the smallest attainable two-sided p is 0.00195, so the "
                           "strongest comparisons all pin there and stop being distinguishable. "
+                          "'bootstrap' -- paired sample-level bootstrap of the 10-fold ENSEMBLE "
+                          "predictions (bootstrap_stats.py): one shared resample per draw, stratified "
+                          "within infusion groups, two-sided p = 2*min(P(diff<0), P(diff>0)), ties "
+                          "split. Tests the same quantity the -ci ensemble bars show and has no n=10 "
+                          "floor (floor is ~2/n_bootstrap). Falls back to an unpaired bootstrap if a "
+                          "model's rows are not aligned with SPARC-P's (printed). "
+                          "'delong' -- paired DeLong test on the ensemble predictions (AUROC only): "
+                          "plain DeLong on the pooled valid rows for overall AUROC and the mortality "
+                          "tasks; for weighted AUROC a stratified DeLong, i.e. the group-size-weighted "
+                          "sum of the per-infusion-group AUROC differences with variance "
+                          "sum(w_g^2 * Var_g), groups independent. No stars for AUPRC. "
                           "The chosen test is appended to the output filename.")
+parser.add_argument('--n_bootstrap', type=int, default=1000,
+                     help='Resamples for --stat_test bootstrap (default 1000)')
+parser.add_argument('--boot_seed', type=int, default=1024,
+                     help='Seed for --stat_test bootstrap (default 1024)')
+parser.add_argument('--precompute_only', action='store_true',
+                     help='With --stat_test bootstrap: fill bootstrap_cache/ for --task (or all '
+                          'tasks) and exit without drawing. Tasks are seeded independently, so '
+                          'running them as separate jobs gives the same numbers as one serial run.')
+parser.add_argument('--task', type=str, default=None,
+                     help='Comma-separated task(s) for --precompute_only (default: all)')
 parser.add_argument('--correction', type=str, default='none',
                      choices=['none', 'bonferroni'],
                      help='Multiple testing correction, applied WITHIN each task: '
@@ -114,7 +134,8 @@ modules = args.modules
 zeroshot = args.zeroshot.lower() == 'true'
 exclude_fn = args.fn
 metric = args.metric
-show_ensemble = args.ensemble
+ci_mode = args.ci
+show_ensemble = args.ensemble and ci_mode == 'folds'   # the CI bars already show the ensemble
 highlight_model = args.highlight.strip() if args.highlight else None
 sort_by = args.sort_by
 ncols_req = args.ncols
@@ -122,18 +143,11 @@ correction_method = args.correction
 stat_test = args.stat_test
 family_style = args.family_style
 
-# Configuration
-# Root holding the results_vis_* trees. The original hardcoded value pointed at
-# /data/morrisq (the old lilac mount); on hosts that mount it elsewhere set
-# --model_path or the SPARC_MODEL_PATH environment variable.
-DEFAULT_MODEL_PATH = '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726'
+# root holding the results_vis_* trees (the $SPARC_MODEL_PATH env var is not read)
+DEFAULT_MODEL_PATH = '/data1/morrisq/fuc/SPARC_CAIA_092426'
+all_model_path = args.model_path or DEFAULT_MODEL_PATH
 
-all_model_path = (args.model_path
-                  or os.environ.get('SPARC_MODEL_PATH')
-                  or DEFAULT_MODEL_PATH)
-
-# --csv_dir wins outright; otherwise assemble it from the parts so a batch
-# rerun can be plotted by passing only --results_subdir.
+# --csv_dir overrides the path built from the parts
 default_csv_dir = os.path.join(all_model_path, args.results_subdir, args.eval_subdir)
 csv_dir = args.csv_dir if args.csv_dir else default_csv_dir
 save_dir = args.save_dir if args.save_dir else csv_dir
@@ -153,12 +167,8 @@ print(f"Writing output to : {save_dir}")
 SIDE_EFFECT_TASKS = ['AKI', 'Liver_toxicity', 'febrile_neutropenia', 'anemia', 'neutropenia']
 BINARY_TASKS = ['binary', 'binary_icu_pre']
 
-# Custom task order for the figure layout
-# Row 1: AKI, anemia, febrile_neutropenia
-# Row 2: neutropenia, Liver_toxicity
-# Row 3: binary, binary_icu_pre
+# 3x3 layout, None = empty panel
 if exclude_fn:
-    # If excluding FN, shift layout: Row 1 has AKI, anemia, None
     TASK_ORDER = [
         'AKI', 'anemia', None,
         'neutropenia', 'Liver_toxicity', None,
@@ -196,6 +206,21 @@ metric_is_weighted = metric.startswith('weighted')
 metric_label_name = 'AUROC' if metric_is_auroc else 'AUPRC'
 metric_label_kind = 'Weighted' if metric_is_weighted else 'Overall'
 
+# ensemble-row bootstrap CI columns from eval_1: auroc_ci_* is the overall AUROC CI,
+# auroc_weighted_ci_* the weighted one; weighted AUPRC has no CI
+CI_COLS_SIDE_EFFECT = {
+    'weighted_auroc': ('auroc_weighted_ci_lower', 'auroc_weighted_ci_upper'),
+    'overall_auroc':  ('auroc_ci_lower', 'auroc_ci_upper'),
+    'weighted_auprc': None,
+    'overall_auprc':  ('auprc_ci_lower', 'auprc_ci_upper'),
+}
+CI_COLS_BINARY = {
+    'weighted_auroc': ('auroc_ci_lower', 'auroc_ci_upper'),
+    'overall_auroc':  ('auroc_ci_lower', 'auroc_ci_upper'),
+    'weighted_auprc': ('auprc_ci_lower', 'auprc_ci_upper'),
+    'overall_auprc':  ('auprc_ci_lower', 'auprc_ci_upper'),
+}
+
 TASK_DISPLAY = {
     'AKI':                 'Acute kidney injury',
     'Liver_toxicity':      'Grade 3 Liver injury',
@@ -206,10 +231,9 @@ TASK_DISPLAY = {
     'binary_icu_pre':      '30D ICU mort.',
 }
 
-# Friendly display names for known models. Any model not listed here falls
-# back to its raw name, so new/unexpected models still plot correctly.
+# display names; unlisted models keep their raw name
 MODEL_DISPLAY = {
-    'SPARC-P':          'SPARC',  # SPARC-P is now called SPARC for publication
+    'SPARC-P':          'SPARC',  # published name
     'lasttp_MLP':       'MLP',
     'lasttp_xgboost':   'XGBoost',
     'temporal_xgboost': 'T-XGBoost',
@@ -219,35 +243,22 @@ MODEL_DISPLAY = {
     'raindrop':         'Raindrop',
 }
 
-# Differentiate time-series vs. last-timepoint methods.
-# (TEMPORAL_MODELS keeps its name for continuity with the rest of the codebase;
-# the user-facing wording is "time series".)
+# time-series vs. last-timepoint methods
+SIMPLE_GREY = '#B5B5B5'   # --style simple: benchmark bars
 TEMPORAL_MODELS = {'SPARC-P', 'temporal_xgboost', 'temporal_tabpfn', 'rnn', 'duett', 'raindrop'}
 LAST_TP_MODELS = {'lasttp_MLP', 'lasttp_xgboost'}
 
-# Method family is shown by the colour of the model's y-axis label.
-#
-# Okabe-Ito blue paired with a darkened vermillion. Simulating the three main
-# colour-vision deficiencies, the RGB separation between the two is:
-#
-#                      normal  protan  deutan  tritan   contrast on white
-#   teal/amber (old)    0.660   0.360   0.467   0.581      6.0 / 5.1
-#   blue/vermillion     1.008   0.698   0.719   0.780      5.2 / 5.3
-#
-# The old teal/amber pair degraded to two near-identical greys under
-# protanopia (#65656E vs #6D6D13). Vermillion is darkened from the stock
-# Okabe-Ito #D55E00 so it clears the WCAG 4.5:1 text-contrast floor (#D55E00
-# is only 3.9:1 on white).
-TIMESERIES_COLOR = '#0072B2'   # blue       -> time series methods
-LASTTP_COLOR     = '#B54A00'   # vermillion -> last-timepoint methods
+# family colour of the y-axis labels: Okabe-Ito blue and a darkened vermillion
+# (colour-blind safe, >= 4.5:1 contrast on white)
+TIMESERIES_COLOR = '#0072B2'
+LASTTP_COLOR     = '#B54A00'
 
-# Load CSVs
-# Prefer _ensemble.csv files when they exist (they have correct DUETT data)
+# Load CSVs (prefer the _ensemble.csv)
 _finetuned_suffix = '_finetuned' if dataset == 'MIMICIV_hosp' and not zeroshot else ''
 
-task_data = {}       # fold-level rows only, per task
-task_data_full = {}  # full rows (incl. ensemble), per task
-task_sample_info = {}  # n_test and n_pos_next_infusion per task
+task_data = {}         # fold rows
+task_data_full = {}    # fold + ensemble rows
+task_sample_info = {}  # n and n_pos per task
 
 for task in ALL_TASKS:
     ensemble_csv_path = f'{csv_dir}/model_performance_dict_across_models_{modules}_{task}_{dataset}{_finetuned_suffix}_ensemble.csv'
@@ -271,10 +282,9 @@ for task in ALL_TASKS:
         df = df_full.copy()
     task_data[task] = df
 
-    # Extract n_test and n_pos_next_infusion for this task
+    # n_pos is next-infusion positives for side-effect tasks, overall positives for binary
     if len(df_full) > 0:
         n_test = df_full['n_test'].iloc[0] if 'n_test' in df_full.columns else None
-        # For side-effect tasks, use n_pos_next_infusion; for binary tasks, use n_pos_overall
         if task in SIDE_EFFECT_TASKS and 'n_pos_next_infusion' in df_full.columns:
             n_pos = df_full['n_pos_next_infusion'].iloc[0]
         elif 'n_pos_overall' in df_full.columns:
@@ -283,10 +293,10 @@ for task in ALL_TASKS:
             n_pos = None
         task_sample_info[task] = {'n': n_test, 'n_pos': n_pos}
 
-available_tasks = ALL_TASKS  # Use the custom order
+available_tasks = ALL_TASKS
 
 if len(available_tasks) == 0:
-    raise RuntimeError("No task CSVs found. Run eval_1_across_models_comparison.py first "
+    raise RuntimeError("No task CSVs found. Run eval_1_across_models_comparison_ensemble_FP_fixed.py first "
                         "(or pass --csv_dir to point at your data).")
 
 print(f"\nCSV directory: {csv_dir}")
@@ -294,9 +304,8 @@ print(f"Loaded {len(available_tasks)} tasks: {available_tasks}")
 print(f"Metric: {metric} ({metric_label_kind} {metric_label_name})\n")
 
 
-# Helper functions
 def get_vals(task, model_key):
-    """Fold-level metric values (percent) for a model on a task."""
+    """Fold-level metric values (percent)."""
     col = METRIC_COL[task]
     df = task_data.get(task)
     if df is None:
@@ -308,7 +317,7 @@ def get_vals(task, model_key):
 
 
 def get_ensemble_val(task, model_key):
-    """Single ensemble performance value (percent), or None if unavailable."""
+    """Ensemble-row value (percent) or None."""
     col = METRIC_COL[task]
     df = task_data_full.get(task)
     if df is None:
@@ -323,10 +332,33 @@ def get_ensemble_val(task, model_key):
     return val * 100
 
 
+def get_ensemble_ci(task, model_key):
+    """(lower, upper) 95% bootstrap CI (percent) of the ensemble row, or None."""
+    cols = (CI_COLS_BINARY if task in BINARY_TASKS else CI_COLS_SIDE_EFFECT)[metric]
+    df = task_data_full.get(task)
+    if cols is None or df is None or not all(c in df.columns for c in cols):
+        return None
+    rows = df[(df['model'] == f'{model_key}_ensemble') & (df['val_fold'] == 'ensemble')]
+    if rows.empty:
+        return None
+    lo, hi = rows[cols[0]].iloc[0], rows[cols[1]].iloc[0]
+    if pd.isna(lo) or pd.isna(hi):
+        return None
+    return lo * 100, hi * 100
+
+
+def bar_value(task, model_key):
+    """Value the bar shows: ensemble estimate (-ci ensemble) or fold mean (-ci folds)."""
+    if ci_mode == 'ensemble':
+        e = get_ensemble_val(task, model_key)
+        if e is not None:
+            return e
+    v = get_vals(task, model_key)
+    return np.mean(v) if len(v) else -np.inf
+
+
 def discover_models(task):
-    """All base model names present in a task's fold-level data (excludes
-    rows that are themselves ensemble summary rows, e.g. 'SPARC-P_ensemble').
-    Also excludes 'SPARC' (non-parsimonious version) per publication requirements."""
+    """Base model names in a task's fold-level data, excluding *_ensemble rows and 'SPARC' (non-parsimonious)."""
     df = task_data.get(task)
     if df is None or 'model' not in df.columns:
         return []
@@ -335,43 +367,44 @@ def discover_models(task):
     return models
 
 
-# Build a master model list + fixed color map (consistent across subplots)
 per_task_models = {task: discover_models(task) for task in available_tasks}
 all_models_seen = sorted(set(m for models in per_task_models.values() for m in models))
 
 
-# Rank models globally by their mean value across all tasks where they appear
+# global ranking: mean bar value over the tasks a model appears in
 model_means = {}
 for m in all_models_seen:
     vals = []
     for task in available_tasks:
         if m in per_task_models[task]:
-            v = get_vals(task, m)
-            if len(v) > 0:
-                vals.append(np.mean(v))
+            bv = bar_value(task, m)
+            if np.isfinite(bv):
+                vals.append(bv)
     model_means[m] = np.mean(vals) if vals else -np.inf
 
 global_model_order = sorted(all_models_seen, key=lambda m: model_means[m], reverse=True)
 
-# Assign a fixed color to every model using a professional color palette
-# Professional color palette with distinct, formal colors
 PROFESSIONAL_COLORS = [
-    '#2C5F8D',  # Deep blue
-    '#E07A5F',  # Terracotta
-    '#81B29A',  # Sage green
-    '#F2CC8F',  # Sand
-    '#6A4C93',  # Deep purple
-    '#D96459',  # Muted red
-    '#5A7D7C',  # Teal
-    '#B68D40',  # Amber
-    '#4A6FA5',  # Medium blue
-    '#A87C7C',  # Mauve
+    '#2C5F8D',
+    '#E07A5F',
+    '#81B29A',
+    '#F2CC8F',
+    '#6A4C93',
+    '#D96459',
+    '#5A7D7C',
+    '#B68D40',
+    '#4A6FA5',
+    '#A87C7C',
 ]
 
-# Assign colors to models, cycling through the palette if needed
-MODEL_COLORS = {}
-for i, m in enumerate(global_model_order):
-    MODEL_COLORS[m] = PROFESSIONAL_COLORS[i % len(PROFESSIONAL_COLORS)]
+# colour fixed per model (MSK_CAIA weighted-AUROC order) so it is stable across figures
+FIXED_COLOR_ORDER = ['SPARC-P', 'temporal_tabpfn', 'temporal_xgboost', 'lasttp_xgboost',
+                     'rnn', 'lasttp_MLP', 'duett', 'raindrop']
+MODEL_COLORS = {m: PROFESSIONAL_COLORS[i % len(PROFESSIONAL_COLORS)]
+                for i, m in enumerate(FIXED_COLOR_ORDER)}
+for m in global_model_order:
+    if m not in MODEL_COLORS:
+        MODEL_COLORS[m] = PROFESSIONAL_COLORS[len(MODEL_COLORS) % len(PROFESSIONAL_COLORS)]
 
 print("Models discovered (ranked by mean performance across available tasks):")
 for m in global_model_order:
@@ -382,27 +415,17 @@ for m in global_model_order:
           else f"  {disp:12s} ({m:20s}): mean = n/a{temporal_marker}")
 print()
 
-# Statistical significance testing function
 def paired_test(vals1, vals2):
-    """
-    Paired test between two sets of fold-level values, selected by --stat_test.
-    Returns p-value, or None if the test cannot be performed.
-
-    Both tests are PAIRED: vals1[i] and vals2[i] are the same CV fold, so the
-    fold-to-fold component is shared and belongs inside the pair, not in the
-    between-group spread.
-    """
+    """Fold-paired t-test or Wilcoxon signed-rank (per --stat_test); None if not computable."""
     if len(vals1) == 0 or len(vals2) == 0:
         return None
     if len(vals1) != len(vals2):
         return None
     try:
         if stat_test == 'wilcoxon':
-            # signed-rank, the paired form. (Rank-SUM / Mann-Whitney is the
-            # unpaired one and would be the wrong test for this data.)
             import numpy as _np
             if _np.allclose(_np.asarray(vals1) - _np.asarray(vals2), 0):
-                return None       # wilcoxon raises when every difference is zero
+                return None       # wilcoxon raises if all differences are zero
             stat_v, p_value = stats.wilcoxon(vals1, vals2, alternative='two-sided')
         else:
             stat_v, p_value = stats.ttest_rel(vals1, vals2, alternative='two-sided')
@@ -410,42 +433,201 @@ def paired_test(vals1, vals2):
     except Exception:
         return None
 
+_EVAL1_RSEED, _EVAL1_BATCH = 1024, 512   # eval_1's -r default and test batch size
+
+def _eval1_loader_perm(n):
+    """Replay eval_1's seeded test-loader shuffle.
+
+    The DL models' prediction rows follow this shuffled order, the tree models' rows are in
+    index order, so dl_row[k] == tree_row[perm[k]].
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    import pytorch_lightning as pl
+    pl.seed_everything(_EVAL1_RSEED, workers=False)
+    return np.concatenate([b.numpy() for b in
+                           DataLoader(list(range(n)), batch_size=_EVAL1_BATCH, shuffle=True)])
+
+def _align_to_reference(preds, ref_key='SPARC-P'):
+    """Reorder each model's rows to SPARC-P's order if the replayed shuffle makes labels, times
+    and infusion numbers match exactly; otherwise leave it (bootstrap_stats then tests unpaired)."""
+    keys = ['y_events', 'time_to_events', 'num_infusions']
+    ref = preds[ref_key]
+    same = lambda d, idx=None: all(
+        np.array_equal(np.asarray(ref[k]).ravel(),
+                       (np.asarray(d[k]).ravel() if idx is None else np.asarray(d[k]).ravel()[idx]))
+        for k in keys)
+    # tree models store (n,) where DL models store (n,1); bootstrap_stats needs equal shapes
+    fix_shape = lambda d: {**d, **{k: np.asarray(d[k]).reshape(np.asarray(ref[k]).shape) for k in keys}}
+    perm = None
+    for m, d in list(preds.items()):
+        if m == ref_key:
+            continue
+        if len(d['y_events']) == len(ref['y_events']) and same(d):
+            preds[m] = fix_shape(d)
+            continue
+        if perm is None:
+            perm = _eval1_loader_perm(len(ref['y_events']))
+        if len(d['y_events']) == len(ref['y_events']) and same(d, perm):
+            preds[m] = fix_shape({k: np.asarray(v).reshape(len(perm), -1)[perm].reshape(np.asarray(v).shape)
+                                  for k, v in d.items()})
+            print(f"  [bootstrap] {m}: realigned to {ref_key} row order (replayed eval_1 shuffle)")
+        else:
+            print(f"  [bootstrap] {m}: could NOT realign -- unpaired test for this task")
+    return preds
+
+def bootstrap_pvalues(task, models):
+    """--stat_test bootstrap: {model: p} for SPARC-P vs each model on this task, from the
+    ensemble-prediction pickles eval_1 wrote. Cached per task in <csv_dir>/bootstrap_cache."""
+    import pickle
+    import bootstrap_stats as bs
+    option = f'{task}_risk' if task in SIDE_EFFECT_TASKS else task
+    # binary tasks have one AUROC/AUPRC, so test the overall variant
+    variant = metric if task in SIDE_EFFECT_TASKS else ('overall_auroc' if metric_is_auroc else 'overall_auprc')
+    cache_dir = os.path.join(csv_dir, 'bootstrap_cache')
+    summ = bs.load_summary(cache_dir, task, dataset, _finetuned_suffix, modules, args.n_bootstrap, args.boot_seed)
+    if summ is None:
+        pred_dir = os.path.join(csv_dir, 'ensemble_predictions')
+        preds = {}
+        for m in ['SPARC-P'] + [x for x in models if x != 'SPARC-P']:
+            pth = os.path.join(pred_dir, f'{modules}_{option}_{dataset}{_finetuned_suffix}_{m}.pickle')
+            if not os.path.exists(pth):
+                print(f"  [bootstrap] missing {os.path.basename(pth)} -- no test for {m}")
+                continue
+            with open(pth, 'rb') as f:
+                preds[m] = pickle.load(f)
+        if 'SPARC-P' not in preds:
+            print(f"  [bootstrap] {task}: no SPARC-P ensemble pickle -- no tests")
+            return {}
+        preds = _align_to_reference(preds)
+        bs.run_and_cache_task(preds, task=task, option=option, dataset=dataset,
+                              finetuned_suffix=_finetuned_suffix, modules=modules,
+                              sparc_model='SPARC-P',
+                              benchmark_models=[m for m in preds if m != 'SPARC-P'],
+                              per_fold_values_by_model={}, fold_mean_by_model={},
+                              cache_dir=cache_dir, n_bootstrap=args.n_bootstrap,
+                              rseed=args.boot_seed, task_index=ALL_TASKS.index(task),
+                              verbose=False)
+        summ = bs.load_summary(cache_dir, task, dataset, _finetuned_suffix, modules, args.n_bootstrap, args.boot_seed)
+    pv = summ[(summ['row_type'] == 'pvalue') & (summ['metric'] == variant)]
+    if len(pv) and (pv['test_type'] != 'paired').any():
+        print(f"  [bootstrap] {task}: UNPAIRED fallback used (rows not aligned)")
+    out = {r['benchmark']: (None if pd.isna(r['p_value']) else float(r['p_value']))
+           for _, r in pv.iterrows()}
+    print(f"  [bootstrap] {task} ({variant}): " +
+          ", ".join(f"{k}={v:.4g}" if v is not None else f"{k}=n/a" for k, v in out.items()))
+    return out
+
+if args.precompute_only:
+    if stat_test != 'bootstrap':
+        raise SystemExit('--precompute_only needs --stat_test bootstrap')
+    _pre = args.task.split(',') if args.task else available_tasks
+    for _t in _pre:
+        if _t not in per_task_models:
+            print(f"  [bootstrap] {_t}: no CSV for {dataset}, skipped")
+            continue
+        import time as _time; _t0 = _time.time()
+        bootstrap_pvalues(_t, per_task_models[_t])
+        print(f"  [bootstrap] {_t}: {_time.time() - _t0:.1f}s")
+    raise SystemExit(0)
+
+def _delong_components(y, s):
+    """DeLong structural components (midrank form) for one score vector.
+    Returns (auc, V10 over positives, V01 over negatives)."""
+    from scipy.stats import rankdata
+    y = np.asarray(y).ravel().astype(bool)
+    s = np.asarray(s, dtype=np.float64).ravel()
+    x, z = s[y], s[~y]
+    m, n = x.size, z.size
+    tz = rankdata(np.concatenate([x, z]))
+    v10 = (tz[:m] - rankdata(x)) / n
+    v01 = 1.0 - (tz[m:] - rankdata(z)) / m
+    return v10.mean(), v10, v01
+
+
+def _delong_diff(y, s1, s2):
+    """Paired DeLong: (AUC1 - AUC2, its variance) for two scores on the same rows."""
+    a1, p1, q1 = _delong_components(y, s1)
+    a2, p2, q2 = _delong_components(y, s2)
+    d10, d01 = p1 - p2, q1 - q2
+    var = ((np.var(d10, ddof=1) / d10.size) if d10.size > 1 else 0.0) + \
+          ((np.var(d01, ddof=1) / d01.size) if d01.size > 1 else 0.0)
+    return a1 - a2, var
+
+
+def delong_pvalues(task, models):
+    """Paired DeLong p-values, SPARC-P vs. each model (AUROC only), on the realigned ensemble pickles.
+
+    Weighted AUROC uses DeLong stratified by infusion group; overall AUROC and binary tasks
+    use plain DeLong.
+    """
+    import pickle
+    from scipy.stats import norm
+    import bootstrap_stats as bs
+    if not metric_is_auroc:
+        print(f"  [delong] {task}: DeLong is defined for AUROC only -- no stars for {metric}")
+        return {}
+    option = f'{task}_risk' if task in SIDE_EFFECT_TASKS else task
+    weighted = (task in SIDE_EFFECT_TASKS) and metric_is_weighted
+    pred_dir = os.path.join(csv_dir, 'ensemble_predictions')
+    preds = {}
+    for m in ['SPARC-P'] + [x for x in models if x != 'SPARC-P']:
+        pth = os.path.join(pred_dir, f'{modules}_{option}_{dataset}{_finetuned_suffix}_{m}.pickle')
+        if os.path.exists(pth):
+            with open(pth, 'rb') as f:
+                preds[m] = pickle.load(f)
+        else:
+            print(f"  [delong] missing {os.path.basename(pth)} -- no test for {m}")
+    if 'SPARC-P' not in preds:
+        return {}
+    preds = _align_to_reference(preds)
+    # two-class infusion groups and their weights, as in the weighted metric
+    ctx = bs.prepare_context(preds['SPARC-P'], option)
+    if ctx['total_n'] == 0:
+        print(f"  [delong] {task}: no usable infusion groups -- no tests")
+        return {}
+    labels = ctx['labels'].ravel()
+    ref = np.asarray(preds['SPARC-P']['y_preds']).ravel()
+    out = {}
+    for m, d in preds.items():
+        if m == 'SPARC-P':
+            continue
+        other = np.asarray(d['y_preds']).ravel()
+        if weighted:
+            delta, var = 0.0, 0.0
+            for rows, n_g in zip(ctx['group_row_idx'], ctx['group_sizes']):
+                w = n_g / ctx['total_n']
+                dg, vg = _delong_diff(labels[rows], ref[rows], other[rows])
+                delta += w * dg
+                var += w * w * vg
+        else:
+            rows = np.concatenate(ctx['group_row_idx'])
+            delta, var = _delong_diff(labels[rows], ref[rows], other[rows])
+        out[m] = float(2 * norm.sf(abs(delta) / np.sqrt(var))) if var > 0 else None
+    print(f"  [delong] {task} ({'weighted, stratified' if weighted else 'overall'}): " +
+          ", ".join(f"{k}={v:.3g}" if v is not None else f"{k}=n/a" for k, v in out.items()))
+    return out
+
 def format_pvalue(p):
-    """Format p-value for display."""
     if p is None:
         return ""
     if p < 0.001:
         return "***"
     elif p < 0.01:
         return "**"
-    elif p < 0.05:
+    elif p < args.alpha:
         return "*"
     else:
-        return ""  # Don't show non-significant results
+        return ""
 
 def apply_correction(pvalues, method='bonferroni'):
-    """
-    Apply multiple testing correction to a list of p-values.
-
-    Scope: the caller passes only the p-values for ONE task (every model in
-    that subplot compared against the reference model), so the correction
-    family is per-task, not the whole figure. A model appearing in several
-    tasks is therefore corrected independently in each.
-
-    Args:
-        pvalues: List of p-values (can contain None)
-        method: 'none' or 'bonferroni'
-
-    Returns:
-        List of corrected p-values (same length as input)
-    """
+    """Bonferroni-correct one task's p-values (None entries kept as None)."""
     if method == 'none':
         return pvalues
     if method != 'bonferroni':
         raise ValueError(f"unsupported correction method: {method!r} "
                          "(expected 'none' or 'bonferroni')")
 
-    # Extract non-None p-values and their indices
     valid_pvals = []
     valid_indices = []
     for i, pv in enumerate(pvalues):
@@ -456,7 +638,6 @@ def apply_correction(pvalues, method='bonferroni'):
     if len(valid_pvals) == 0:
         return pvalues
 
-    # Bonferroni: multiply by the number of tests within this task
     n = len(valid_pvals)
     corrected = [None] * len(pvalues)
     for i, idx in enumerate(valid_indices):
@@ -464,11 +645,10 @@ def apply_correction(pvalues, method='bonferroni'):
 
     return corrected
 
-# Figure layout: fixed 3x3 grid for custom task layout
+# fixed 3x3 grid
 nrows = 3
 ncols = 3
 
-# Height scales with the largest number of models any single subplot needs
 max_models_per_task = max(len(per_task_models[t]) for t in available_tasks)
 row_height = max(2.2, max_models_per_task * 0.5)
 fig_width = 6.2 * ncols
@@ -479,23 +659,20 @@ axes_flat = axes.flatten()
 
 bar_height = 0.6
 
-# Collected when --family_style underline; consumed after tight_layout().
+# --family_style underline: underlines drawn after tight_layout()
 axes_needing_underline = []
 
 for idx, task in enumerate(TASK_ORDER):
     ax = axes_flat[idx]
 
-    # Skip if this is an empty slot
     if task is None:
         ax.axis('off')
         continue
 
-    # Skip if task data not available
     if task not in task_data:
         ax.axis('off')
         continue
 
-    # Determine if this subplot is in the leftmost column
     col_idx = idx % ncols
     is_leftmost = (col_idx == 0)
 
@@ -503,18 +680,20 @@ for idx, task in enumerate(TASK_ORDER):
         task_models = [m for m in global_model_order if m in per_task_models[task]]
     else:
         task_models = sorted(per_task_models[task],
-                              key=lambda m: np.mean(get_vals(task, m)) if len(get_vals(task, m)) else -np.inf)
+                              key=lambda m: bar_value(task, m))
         task_models = list(reversed(task_models))
+    if args.style == 'simple':
+        # time-series methods first, then last-timepoint
+        _ts = [m for m in task_models if m in TEMPORAL_MODELS]
+        task_models = _ts + [m for m in task_models if m not in TEMPORAL_MODELS]
+        _n_ts = len(_ts)
 
     y_positions = np.arange(len(task_models))[::-1]  # best model on top
 
-    # Determine x-axis limits first (needed for positioning significance stars)
-    # AUROC: always 50-100
-    # AUPRC: 0-50 or 50-100 based on max mean value for this task
+    # AUROC axis 50-100; AUPRC 0-50 or 50-100 depending on the best fold mean
     if metric_is_auroc:
         xlim_left, xlim_right = 50, 100
     else:
-        # For AUPRC, determine range based on max mean
         max_mean = max([np.mean(get_vals(task, m)) for m in task_models
                         if len(get_vals(task, m)) > 0], default=0)
         if max_mean >= 50:
@@ -522,29 +701,29 @@ for idx, task in enumerate(TASK_ORDER):
         else:
             xlim_left, xlim_right = 0, 50
 
-    # Position for significance stars: slightly left of right edge
     sig_star_x = xlim_right - 2
 
-    # Get SPARC-P values for statistical testing
     sparc_p_vals = get_vals(task, 'SPARC-P') if 'SPARC-P' in task_models else np.array([])
 
-    # Calculate statistical significance for SPARC-P vs. all other models
+    # significance vs. SPARC-P
     sig_annotations = {}
     if len(sparc_p_vals) > 0:
-        # Collect all p-values first
         pvalues = []
         model_order = []
+        boot_p = (bootstrap_pvalues(task, task_models) if stat_test == 'bootstrap' else
+                  delong_pvalues(task, task_models) if stat_test == 'delong' else None)
         for model in task_models:
             if model != 'SPARC-P':
-                model_vals = get_vals(task, model)
-                p_val = paired_test(sparc_p_vals, model_vals)
+                if boot_p is not None:
+                    p_val = boot_p.get(model)
+                else:
+                    model_vals = get_vals(task, model)
+                    p_val = paired_test(sparc_p_vals, model_vals)
                 pvalues.append(p_val)
                 model_order.append(model)
 
-        # Apply correction if requested
         corrected_pvalues = apply_correction(pvalues, method=correction_method)
 
-        # Format corrected p-values
         for model, p_val in zip(model_order, corrected_pvalues):
             sig_annotations[model] = format_pvalue(p_val)
 
@@ -554,17 +733,31 @@ for idx, task in enumerate(TASK_ORDER):
             continue
         mean_val = np.mean(vals)
         std_val = np.std(vals)
+        xerr_val = std_val
+        if ci_mode == 'ensemble':
+            ens_val = get_ensemble_val(task, model)
+            if ens_val is None:
+                print(f"WARNING [{task}] {model}: no ensemble row; drawing fold mean +/- SD instead")
+            else:
+                mean_val = ens_val
+                ci = get_ensemble_ci(task, model)
+                if ci is None:
+                    print(f"WARNING [{task}] {model}: no ensemble CI for {metric}; bar drawn without error bar")
+                    xerr_val = None
+                else:
+                    xerr_val = [[max(mean_val - ci[0], 0)], [max(ci[1] - mean_val, 0)]]
         color = MODEL_COLORS[model]
+        if args.style == 'simple' and model != 'SPARC-P':
+            color = SIMPLE_GREY
 
         is_highlight = (highlight_model is not None and model == highlight_model)
         edge_color = 'black'
         edge_width = 2.2 if is_highlight else 1.0
 
-        ax.barh(y_pos, mean_val, height=bar_height, xerr=std_val,
+        ax.barh(y_pos, mean_val, height=bar_height, xerr=xerr_val,
                 color=color, edgecolor=edge_color, linewidth=edge_width,
                 error_kw={'elinewidth': 1.1, 'capsize': 2.5, 'capthick': 1.1})
 
-        # Add statistical significance annotation if available
         if model in sig_annotations and sig_annotations[model] and sig_annotations[model] != "":
             sig_text = sig_annotations[model]
             ax.text(sig_star_x, y_pos, sig_text,
@@ -577,13 +770,14 @@ for idx, task in enumerate(TASK_ORDER):
                         color='red', markeredgecolor='darkred',
                         markeredgewidth=1.1, zorder=10)
 
+    if args.style == 'simple' and 0 < _n_ts < len(task_models):
+        # rule between the two groups
+        ax.axhline((y_positions[_n_ts - 1] + y_positions[_n_ts]) / 2, color='#888888',
+                   linewidth=0.8, linestyle=(0, (3, 2)), zorder=0)
     ax.set_yticks(y_positions)
 
-    # Only show y-axis labels on leftmost column, with temporal/last-tp markers
+    # y labels on the left column only; method family shown by label colour
     if is_leftmost:
-        # Method family is encoded in the TEXT COLOUR of the tick label rather
-        # than a glyph prefix: it keeps the labels flush-left (no ragged
-        # indent from the marker) and reads at a glance.
         labels = [MODEL_DISPLAY.get(m, m) for m in task_models]
         ax.set_yticklabels(labels, fontsize=10)
         if family_style == 'color':
@@ -595,20 +789,16 @@ for idx, task in enumerate(TASK_ORDER):
                 else:
                     tick_label.set_color('black')
         else:
-            # 'underline': labels stay black; the rules are drawn after layout
-            # is final (see UNDERLINE PASS below), because a text extent is only
-            # known once the figure has been rendered.
+            # underlines are drawn after the final layout (below)
             for tick_label in ax.get_yticklabels():
                 tick_label.set_color('black')
             axes_needing_underline.append((ax, list(task_models)))
     else:
         ax.set_yticklabels([])
 
-    # Set x-axis limits (already calculated earlier)
     ax.set_xlim(left=xlim_left, right=xlim_right)
     ax.set_xlabel(f'{metric_label_kind} {metric_label_name} (%)', fontsize=10)
 
-    # Build title with sample info
     title_str = TASK_DISPLAY.get(task, task)
     if task in task_sample_info:
         info = task_sample_info[task]
@@ -620,15 +810,14 @@ for idx, task in enumerate(TASK_ORDER):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-# Overall title
 dataset_display = dataset.replace('_', '-')
 suptitle_text = (f'Model Performance — {metric_label_kind} {metric_label_name} '
-                  f'Across Clinical Tasks ({dataset_display})')
+                  f'Across Clinical Tasks ({dataset_display})'
+                  + ('\nBars: 10-fold ensemble, error bars: 95% bootstrap CI' if ci_mode == 'ensemble'
+                     else '\nBars: mean over 10 folds, error bars: SD across folds'))
 fig.suptitle(suptitle_text, fontsize=15, fontweight='bold', y=1.0 + 0.01 * nrows)
 
-# Create legend entries for temporal indicators and ensemble
-# Colour swatches matching the y-axis label colours (see TIMESERIES_COLOR /
-# LASTTP_COLOR): the legend text itself is drawn in the family colour.
+# legend: method-family swatches (and the ensemble marker)
 if family_style == 'color':
     legend_elements = [
         plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=TIMESERIES_COLOR,
@@ -639,7 +828,6 @@ if family_style == 'color':
                    label='Last timepoint method'),
     ]
 else:
-    # Underline variant: a short rule stands in for the swatch.
     legend_elements = [
         plt.Line2D([0], [0], color='black', lw=1.4, marker='', markersize=0,
                    label='Time series method (underlined)'),
@@ -654,40 +842,33 @@ if show_ensemble:
                    label='◆ Ensemble performance')
     )
 
-# Add legend to the figure with better positioning
-# Legend sits just below the axes; the significance note goes further below
-# it. These were 0.00 / -0.025, which overlapped once the note grew to
-# mention the per-task correction.
+# legend just below the axes, significance note below it
 legend_y_pos = 0.005
 _leg = fig.legend(handles=legend_elements, loc='upper center',
                   bbox_to_anchor=(0.5, legend_y_pos),
                   ncol=len(legend_elements), fontsize=10, frameon=False)
-# Draw each legend label in its own family colour so the legend and the
-# y-axis labels use exactly the same encoding.
 if family_style == 'color':
     for _txt, _h in zip(_leg.get_texts(), legend_elements):
         _txt.set_color(_h.get_markerfacecolor())
 
-# Add note about statistical significance with better spacing to avoid overlap
 correction_text = ''
 if correction_method == 'bonferroni':
     correction_text = '; Bonferroni correction applied within each task'
 
 _test_label = {'ttest_rel': 'paired t-test',
-               'wilcoxon': 'paired Wilcoxon signed-rank'}[stat_test]
-sig_note = f'*p<0.05, **p<0.01, ***p<0.001 ({_test_label} vs. SPARC{correction_text}; non-significant comparisons not shown)'
+               'wilcoxon': 'paired Wilcoxon signed-rank',
+               'bootstrap': f'paired stratified bootstrap of ensemble predictions, {args.n_bootstrap} resamples',
+               'delong': ('paired DeLong on ensemble predictions, stratified by infusion group'
+                          if metric_is_weighted else 'paired DeLong on ensemble predictions')}[stat_test]
+sig_note = f'*p<{args.alpha:g}, **p<0.01, ***p<0.001 ({_test_label} vs. SPARC{correction_text}; non-significant comparisons not shown)'
 sig_y_pos = -0.045
 fig.text(0.5, sig_y_pos, sig_note,
          ha='center', fontsize=8, style='italic', color='dimgray')
 
 plt.tight_layout()
-# Reduce space between subplots
 plt.subplots_adjust(wspace=0.15, hspace=0.3)
 
-# UNDERLINE PASS (--family_style underline)
-# matplotlib has no text-underline property, so the rule is drawn manually.
-# It must happen after tight_layout()/subplots_adjust(), because a label's
-# extent is only meaningful once the final layout has been rendered.
+# --family_style underline: draw the rules by hand once label extents are final
 if family_style == 'underline' and axes_needing_underline:
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
@@ -697,22 +878,20 @@ if family_style == 'underline' and axes_needing_underline:
                 continue
             bb = _tick_label.get_window_extent(renderer=renderer)
             bb_ax = bb.transformed(_ax.transAxes.inverted())
-            # Sit the rule just under the glyph baseline; a little inset on
-            # each side so it tracks the text rather than its padding box.
+            # just under the baseline
             y = bb_ax.y0 - 0.006
             _ax.plot([bb_ax.x0, bb_ax.x1], [y, y],
                      transform=_ax.transAxes, color='black',
                      linewidth=0.9, clip_on=False, zorder=5)
 
-# Save figure
 fn_suffix = '_noFN' if exclude_fn else ''
-ensemble_suffix = '_with_ensemble' if show_ensemble else ''
+ensemble_suffix = '_ensembleCI' if ci_mode == 'ensemble' else ('_with_ensemble' if show_ensemble else '')
 highlight_suffix = f'_hl-{highlight_model}' if highlight_model else ''
 correction_suffix = f'_{correction_method}' if correction_method != 'none' else ''
-# non-default test is tagged in the filename so the two versions cannot
-# overwrite each other; the default keeps the established name.
+# non-default tests are tagged in the filename
 test_suffix = f'_{stat_test}' if stat_test != 'ttest_rel' else ''
-style_suffix = '_underline' if family_style == 'underline' else ''
+style_suffix = (('_underline' if family_style == 'underline' else '') + ('_simple' if args.style == 'simple' else '')
+                + (f'_alpha{args.alpha:g}' if args.alpha != 0.05 else ''))
 out_pdf = (f'{save_dir}/all_models_grid_{modules}_{dataset}{_finetuned_suffix}'
            f'{ensemble_suffix}{fn_suffix}{highlight_suffix}{test_suffix}{correction_suffix}{style_suffix}_{metric}.pdf')
 out_png = (f'{save_dir}/all_models_grid_{modules}_{dataset}{_finetuned_suffix}'
