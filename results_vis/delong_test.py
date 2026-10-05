@@ -1,12 +1,5 @@
-"""
-DeLong's test for comparing two correlated ROC curves.
-
-Based on:
-DeLong ER, DeLong DM, Clarke-Pearson DL. Comparing the areas under two or more
-correlated receiver operating characteristic curves: a nonparametric approach.
-Biometrics. 1988;44(3):837-845.
-
-Implementation adapted from scipy and various scientific Python implementations.
+"""DeLong's test for comparing two correlated ROC curves.
+DeLong, DeLong & Clarke-Pearson, Biometrics 1988;44(3):837-845.
 """
 
 import numpy as np
@@ -32,15 +25,8 @@ def compute_midrank(x):
 
 
 def fastDeLong(predictions_sorted_transposed, label_1_count):
-    """
-    The fast version of DeLong's method for computing the covariance of
-    unadjusted AUC.
-
-    Args:
-        predictions_sorted_transposed: a 2D numpy.array[n_classifiers, n_examples]
-            sorted such that the examples with label "1" are first
-    Returns:
-        (AUC value, AUC covariance)
+    """Fast DeLong: (AUCs, AUC covariance) for an [n_classifiers, n_examples] array
+    sorted so the positive examples come first.
     """
     # Short variables are named as they are in the paper
     m = label_1_count
@@ -65,13 +51,6 @@ def fastDeLong(predictions_sorted_transposed, label_1_count):
     return aucs, delongcov
 
 
-def calc_pvalue(aucs, sigma):
-    """Computes log(10) of p-values."""
-    l = np.array([[1, -1]])
-    z = np.abs(np.diff(aucs)) / np.sqrt(np.dot(np.dot(l, sigma), l.T))
-    return np.log10(2) + stats.norm.logsf(z, loc=0, scale=1) / np.log(10)
-
-
 def compute_ground_truth_statistics(ground_truth):
     assert np.array_equal(np.unique(ground_truth), [0, 1])
     order = (-ground_truth).argsort()
@@ -80,19 +59,8 @@ def compute_ground_truth_statistics(ground_truth):
 
 
 def delong_roc_test(ground_truth, predictions_one, predictions_two):
-    """
-    Computes DeLong test for the comparison of two correlated ROC curves.
-
-    Args:
-        ground_truth: 1D array of binary ground truth labels (0 or 1)
-        predictions_one: 1D array of predictions from model 1
-        predictions_two: 1D array of predictions from model 2
-
-    Returns:
-        log10_pvalue: log10 of the p-value
-        auc_diff: AUC difference (model 1 - model 2)
-        z_score: z-score from the test
-        pvalue: actual p-value
+    """DeLong test of model 1 vs model 2 on binary labels.
+    Returns a dict with log10_pvalue, pvalue, z_score, auc_diff (1 - 2), auc1, auc2.
     """
     ground_truth = np.array(ground_truth)
     predictions_one = np.array(predictions_one)
@@ -102,7 +70,6 @@ def delong_roc_test(ground_truth, predictions_one, predictions_two):
     predictions_sorted_transposed = np.vstack((predictions_one, predictions_two))[:, order]
     aucs, delongcov = fastDeLong(predictions_sorted_transposed, label_1_count)
 
-    # Compute z-score and p-value
     l = np.array([[1, -1]])
     z_score = np.abs(np.diff(aucs)) / np.sqrt(np.dot(np.dot(l, delongcov), l.T))
     z_score = float(z_score.squeeze())

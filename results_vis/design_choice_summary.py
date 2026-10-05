@@ -1,14 +1,6 @@
 """
-Shared summary exporter for the design-choice visualizations.
-
-Writes two CSVs next to each figure: <stem>_summary_long.csv (one row per
-task/model/fold) and <stem>_summary_wide.csv (mean, std, n_folds per
-task/model/metric).
-
-The caller passes the same dataframes it is about to plot, so the exported
-numbers match the bars and error bars exactly -- including any relabelling or
-filtering done upstream -- and are in the figure's units (percent if the figure
-converts).
+Summary exporter for the design-choice figures: writes <stem>_summary_long.csv (one row per
+task/model/fold) and <stem>_summary_wide.csv (mean, std, n_folds) from the same dataframes the figure plots.
 """
 
 import os
@@ -31,46 +23,10 @@ def build_design_choice_summary(
     extra_cols=None,
     verbose=True,
 ):
-    """Aggregate per-task CSVs into combined long + wide summary CSVs.
+    """Write long and wide summary CSVs from the figure's per-task dataframes.
 
-    Parameters
-    ----------
-    design_choice : str
-        Label identifying the design choice (e.g. 'design_choice_1_loss').
-    task_data : dict[str, pd.DataFrame]
-        {task -> dataframe}. Each dataframe must have a 'model' column and the
-        metric columns listed in `metrics`. This is the SAME dict the figure
-        plots from, so units/labels/sources already match the figure.
-    available_tasks : list[str]
-        Tasks to include, in display order.
-    models : list[str]
-        Model keys (values in the 'model' column) to include.
-    metrics : dict[str, str] | dict[str, dict[str, str]]
-        Mapping {metric_name -> source_column}. The source_column may be a plain
-        string (same column for every task) OR a per-task dict
-        {task -> column} for figures whose metric column varies by task
-        (e.g. weighted-next-infusion AUROC for side-effects vs plain AUROC for
-        binary). metric_name is what appears in the 'metric' column of the output.
-    save_dir : str
-        Directory to write the two CSVs into.
-    out_stem : str
-        Filename stem, e.g. 'loss_comparison_parsimonious_MSK'. The function
-        appends '_summary_long.csv' and '_summary_wide.csv'.
-    task_display, model_display : dict | None
-        Optional pretty-name maps for a 'task_display' / 'model_display' column.
-    to_percent : bool
-        If True, multiply metric values by 100 when they look like proportions
-        (max <= 1.0), matching the figures which plot percent. Applied per
-        (task, model, metric) group, mirroring get_vals() in the scripts.
-    extra_cols : list[str] | None
-        Optional passthrough columns to carry from the source rows into the long
-        file (e.g. 'description', 'medication'). Missing columns are skipped.
-    verbose : bool
-        Print a short report.
-
-    Returns
-    -------
-    (long_df, wide_df, long_path, wide_path)
+    metrics maps metric_name -> source column, or -> {task: column} when the column varies by task.
+    Returns (long_df, wide_df, long_path, wide_path).
     """
     os.makedirs(save_dir, exist_ok=True)
     extra_cols = extra_cols or []

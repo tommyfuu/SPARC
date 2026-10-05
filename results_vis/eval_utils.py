@@ -1,9 +1,4 @@
-"""
-Shared utility functions for evaluation scripts in test_fixed/
-
-This module provides common evaluation functions used across multiple
-evaluation scripts to avoid code duplication.
-"""
+"""Shared metric helpers for the eval scripts (weighted C-index / next-infusion AUROC by infusion number)."""
 
 import torch
 from torchsurv.metrics.cindex import ConcordanceIndex
@@ -13,16 +8,10 @@ from torchmetrics import AUROC, AveragePrecision, Accuracy, Precision, Recall
 def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_infusion,
                                            mode='train', option='AKI_risk',
                                            extended_metrics=False):
-    """
-    Calculate weighted C-index stratified by infusion number.
-    Only includes infusions where C-index can be computed.
+    """C-index and next-infusion AUROC/AUPRC, weighted over infusion-number groups.
 
-    extended_metrics=True additionally computes auprc_next_infusion_overall, which
-    eval_1 writes to its results CSV. Everything else is returned either way.
-
-    Returns:
-        dict with keys: c_index_weighted, c_index_overall, num_groups, num_samples,
-                    auroc metrics, and optionally binary_loss (as tensor for backprop)
+    Only groups where the metric is computable are used. extended_metrics=True also
+    returns auprc_next_infusion_overall (written by eval_1).
     """
     auroc_fn = AUROC(task='binary')
     accuracy_fn = Accuracy(task='binary')
@@ -32,7 +21,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
     c_index = ConcordanceIndex()
     output_dict = {}
 
-    # Ensure device consistency
     device = y_pred.device if torch.is_tensor(y_pred) else 'cpu'
     num_infusion_tensor = torch.as_tensor(num_infusion, device=device)
     y_event_tensor = torch.as_tensor(y_event, device=device)
@@ -41,9 +29,9 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
     unique_infusions = torch.unique(num_infusion_tensor)
     risk_scores = y_pred.squeeze()
 
-    # Part 1: Risk prediction metrics (C-index)
+    # C-index
     if 'risk' in option:
-        # First pass: identify valid infusions (has both events and censoring)
+        # groups with both events and censored samples
         valid_infusions = []
         for infusion in unique_infusions:
             mask = num_infusion_tensor == infusion
@@ -52,7 +40,7 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
             if current_events.sum() > 0 and current_events.sum() < len(current_events):
                 valid_infusions.append(infusion)
 
-        # Calculate raw C-index (no stratification)
+        # unstratified C-index
         try:
             c_idx_raw = c_index(
                 risk_scores.unsqueeze(1),
@@ -62,7 +50,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
         except Exception:
             c_idx_raw = 0.5
 
-        # Initialize with defaults
         c_index_weighted = 0.5
         overall_c_index = 0.5
         num_groups = 0
@@ -70,7 +57,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
         computable_results = []
 
         if len(valid_infusions) > 0:
-            # Second pass: compute C-index for valid infusions
             for infusion in valid_infusions:
                 mask = num_infusion_tensor == infusion
                 current_risk = risk_scores[mask]
@@ -95,14 +81,13 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                     continue
 
         if len(computable_results) > 0:
-            # Calculate weighted C-index
             total_samples = sum(r['num_samples'] for r in computable_results)
             c_index_weighted = sum(
                 r['c_index'] * r['num_samples'] / total_samples
                 for r in computable_results
             )
 
-            # Calculate overall C-index
+            # overall C-index pooled over the valid groups
             all_mask = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
             for r in computable_results:
                 all_mask |= r['mask']
@@ -127,9 +112,7 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
             'per_infusion': computable_results,
         })
 
-    # Part 2: Next-infusion side effect prediction (AUROC)
-
-    # Create binary labels: 1 if side effect occurs in next infusion, 0 otherwise
+    # Next-infusion AUROC: label = event at the next infusion (time_to_event == 1)
     time_to_event_tensor = time_to_event_tensor.flatten()
     next_infusion_event = ((y_event_tensor == 1) & (time_to_event_tensor == 1)).float()
 
@@ -138,14 +121,12 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
         mask = num_infusion_tensor == infusion
         current_next_events = next_infusion_event[mask]
 
-        # Valid if has both positives and negatives
         has_positives = current_next_events.sum() > 0
         has_negatives = current_next_events.sum() < len(current_next_events)
 
         if has_positives and has_negatives:
             valid_infusions_auroc.append(infusion)
 
-    # Initialize defaults
     auroc_next_weighted = 0.5
     auroc_next_overall = 0.5
     accuracy_next_weighted = 0.5
@@ -156,7 +137,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
     num_samples_auroc = 0
 
     if len(valid_infusions_auroc) > 0:
-        # Second pass: compute AUROC for valid infusions
         computable_auroc_results = []
 
         for infusion in valid_infusions_auroc:
@@ -166,7 +146,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
             try:
                 current_res = {'num_samples': mask.sum().item()}
                 if mode != 'train':
-                    # Calculate metrics
                     current_risk = current_risk.float()
                     auroc = auroc_fn(current_risk, current_next_events.int())
                     accuracy = accuracy_fn(current_risk, current_next_events.int())
@@ -193,7 +172,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                 continue
 
         if len(computable_auroc_results) > 0:
-            # Calculate weighted metrics
             total_samples_auroc = sum(r['num_samples'] for r in computable_auroc_results)
             if mode != 'train':
                 auroc_next_weighted = sum(
@@ -217,7 +195,6 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                     for r in computable_auroc_results
                 )
                 output_dict.update({
-                    # Next-infusion prediction metrics
                     'auroc_next_infusion_weighted': auroc_next_weighted,
                     'accuracy_next_infusion_weighted': accuracy_next_weighted,
                     'precision_next_infusion_weighted': precision_next_weighted,
@@ -228,7 +205,7 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                 })
 
             if mode != 'train':
-                # Calculate overall AUROC across all valid samples
+                # overall AUROC pooled over the valid groups
                 all_mask_auroc = torch.zeros_like(num_infusion_tensor, dtype=torch.bool)
                 for r in computable_auroc_results:
                     all_mask_auroc |= r['mask']
@@ -271,3 +248,26 @@ def calculate_weighted_c_index_by_infusion(y_pred, y_event, time_to_event, num_i
                 output_dict['auprc_next_infusion_overall'] = 0.5
 
     return output_dict
+
+
+def nextinf_auroc_weighted_overall(y_pred, next_event, num_infusion):
+    """Numpy version of the weighted and overall next-infusion AUROC (same definition as above).
+
+    Used for the bootstrap CIs in eval_1. Returns (nan, nan) if no group has both classes.
+    """
+    import numpy as _np
+    from sklearn.metrics import roc_auc_score as _auc
+    y_pred = _np.asarray(y_pred, dtype=float).ravel()
+    next_event = _np.asarray(next_event).ravel().astype(int)
+    num_infusion = _np.asarray(num_infusion).ravel()
+    num, den, keep = 0.0, 0, _np.zeros(len(next_event), dtype=bool)
+    for g in _np.unique(num_infusion):
+        m = num_infusion == g
+        npos = next_event[m].sum()
+        if 0 < npos < m.sum():
+            num += _auc(next_event[m], y_pred[m]) * m.sum()
+            den += int(m.sum())
+            keep |= m
+    if den == 0:
+        return float('nan'), float('nan')
+    return num / den, _auc(next_event[keep], y_pred[keep])
