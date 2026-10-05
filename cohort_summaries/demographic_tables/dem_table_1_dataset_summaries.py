@@ -1,31 +1,8 @@
 #!/usr/bin/env python3
-"""
-dataset_summaries.py
+"""Cohort summary for one SPARC dataset: patient and measurement counts, visit dates per patient,
+gender, and age bin at first measurement (for MSK, shifted from age at sequencing by the first date).
 
-Cohort summary statistics for each SPARC dataset:
-  - Patient count
-  - Lab / vitals measurement counts (non-NA values)
-  - Distribution of unique visit dates per patient
-  - Gender distribution
-  - Estimated age group at first measurement
-
-Supported datasets:
-    MSK, MSK_CAIA, MSK_timeshift, MSK_CAIA_timeshift, StanfordEHRSHOT, MIMICIV_hosp
-
-Age estimation logic:
-  * CAIA / StanfordEHRSHOT / MIMICIV_hosp:
-        The age dict already stores age-at-first-measurement in 5-year bins → use directly.
-  * MSK / MSK_timeshift:
-        The age dict stores age-at-sequencing in 5-year bins.
-        Dates in the lab/vitals dicts are days relative to the sequencing anchor.
-        Estimated age bin at first measurement:
-            bin = floor( (age_bin * 5 * 365 + first_date_days) / 365 / 5 )
-
-Usage examples:
-    python dataset_summaries_fixed.py -ds MSK
-    python dataset_summaries_fixed.py -ds MSK_CAIA -cp prior
-    python dataset_summaries.py -ds StanfordEHRSHOT
-    python dataset_summaries.py -ds MIMICIV_hosp -od /path/to/output
+Usage: python dem_table_1_dataset_summaries.py -ds MSK_CAIA [-cp prior] [-od DIR]
 """
 
 import os
@@ -39,11 +16,9 @@ matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------------
-# Path setup — resolve SPARC/data so dataset_loading.py is importable
-# ---------------------------------------------------------------------------
+# Path setup: resolve SPARC/data so dataset_loading.py is importable
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))          # …/cohort_summaries/demographic_tables
-# two levels up now that this lives in a subfolder: demographic_tables -> cohort_summaries -> SPARC
+# demographic_tables -> cohort_summaries -> SPARC
 _SPARC_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))       # …/SPARC
 _DATA_DIR   = os.path.join(_SPARC_ROOT, 'data')                   # …/SPARC/data
 
@@ -63,9 +38,7 @@ import sparc_paths
 
 from dataset_loading import load_dataset
 
-# ---------------------------------------------------------------------------
 # Argument parsing
-# ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(
     prog='dataset_summaries',
     description='Cohort summary statistics across SPARC datasets',
@@ -109,9 +82,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# ---------------------------------------------------------------------------
 # Resolve parameters
-# ---------------------------------------------------------------------------
 dataset = args.dataset
 modules = args.modules
 
@@ -147,9 +118,7 @@ if 'CAIA' in dataset:
     print(f"Impact subset filter   : {impact_subset}")
 print(f"Output directory : {out_dir}")
 
-# ---------------------------------------------------------------------------
 # Load data via dataset_loading.py
-# ---------------------------------------------------------------------------
 print(f"\nLoading dataset '{dataset_load}' (normalize=False, modules={modules}, option=binary)…")
 
 data_dict_lab_dict, _, split_dict, _, _ = load_dataset(
@@ -187,9 +156,7 @@ cbc_differential_dict = data_dict_lab_dict.get('cbc_differential', {})  # Only p
 age_dict             = data_dict_lab_dict.get('age',    {})   # {pid: [age_bin]}
 gender_dict          = data_dict_lab_dict.get('gender', {})   # {pid: [female_oh]}  (MALE reduced)
 
-# ---------------------------------------------------------------------------
 # Helper: count valid (non-NA) measurements
-# ---------------------------------------------------------------------------
 _INVALID_STRS = frozenset({'NA', 'nan', 'NAN', 'TNP', 'Negative', 'null', 'None', ''})
 
 def _is_valid(v):
@@ -217,9 +184,7 @@ def count_valid_measurements(data_dict, patient_ids):
                     total += 1
     return total
 
-# ---------------------------------------------------------------------------
 # 1. Measurement counts
-# ---------------------------------------------------------------------------
 print("Counting measurements…")
 lab_counts    = count_valid_measurements(basic_lab_dict,    all_patient_ids)
 vitals_counts = count_valid_measurements(basic_vitals_dict, all_patient_ids)
@@ -230,9 +195,7 @@ n_with_labs   = sum(1 for pid in all_patient_ids if pid in basic_lab_dict    and
 n_with_vitals = sum(1 for pid in all_patient_ids if pid in basic_vitals_dict and basic_vitals_dict[pid])
 n_with_cbc_diff = sum(1 for pid in all_patient_ids if pid in cbc_differential_dict and cbc_differential_dict[pid]) if cbc_differential_dict else 0
 
-# ---------------------------------------------------------------------------
 # 2. Unique visit-date distribution (union of lab + vitals + CBC diff dates per patient)
-# ---------------------------------------------------------------------------
 print("Computing visit-date distribution…")
 dates_per_patient = []
 for pid in all_patient_ids:
@@ -246,9 +209,7 @@ for pid in all_patient_ids:
 dates_series = pd.Series(dates_per_patient)
 dates_desc   = dates_series.describe(percentiles=[0.25, 0.5, 0.75])
 
-# ---------------------------------------------------------------------------
 # 3. Gender distribution
-# ---------------------------------------------------------------------------
 print("Computing gender distribution…")
 n_female  = 0
 n_male    = 0
@@ -272,9 +233,7 @@ pct_female  = 100.0 * n_female  / n_patients if n_patients > 0 else 0.0
 pct_male    = 100.0 * n_male    / n_patients if n_patients > 0 else 0.0
 pct_unknown = 100.0 * n_unknown / n_patients if n_patients > 0 else 0.0
 
-# ---------------------------------------------------------------------------
 # 4. Age at first measurement distribution
-# ---------------------------------------------------------------------------
 print("Computing age-at-first-measurement distribution…")
 age_bins_at_first_meas = []
 
@@ -318,9 +277,7 @@ age_desc = age_series.describe(percentiles=[0.25, 0.5, 0.75])
 age_median_years_lo = int(age_desc['50%']) * 5
 age_median_years_hi = int(age_desc['50%']) * 5 + 4
 
-# ---------------------------------------------------------------------------
 # 5. Print summary
-# ---------------------------------------------------------------------------
 SEPARATOR = "=" * 70
 
 print(f"\n{SEPARATOR}")
@@ -368,9 +325,7 @@ for label, cnt in age_counts.items():
 
 print(f"\n{SEPARATOR}")
 
-# ---------------------------------------------------------------------------
 # 6. Save summary CSV
-# ---------------------------------------------------------------------------
 summary_rows = [
     ('n_patients',                    n_patients),
     ('n_with_labs',                   n_with_labs),
@@ -412,11 +367,9 @@ age_dist_csv = os.path.join(out_dir, f'age_distribution_{dataset}.csv')
 age_dist_df.to_csv(age_dist_csv, index=False)
 print(f"Saved age dist CSV: {age_dist_csv}")
 
-# ---------------------------------------------------------------------------
 # 7. Plots
-# ---------------------------------------------------------------------------
 
-# ── Plot A: age distribution bar chart ────────────────────────────────────
+# Plot A: age distribution bar chart
 fig, ax = plt.subplots(figsize=(12, 6))
 x = range(len(age_dist_df))
 ax.bar(x, age_dist_df['count'], color='#5B9AA9', edgecolor='black', linewidth=0.5, alpha=0.9)
@@ -440,7 +393,7 @@ plt.savefig(age_plot, bbox_inches='tight')
 plt.close()
 print(f"Saved age plot    : {age_plot}")
 
-# ── Plot B: gender bar chart ───────────────────────────────────────────────
+# Plot B: gender bar chart
 gender_labels  = ['Female', 'Male', 'Unknown']
 gender_values  = [n_female, n_male, n_unknown]
 gender_colors  = ['#E8A0BF', '#6BA3BE', '#C0C0C0']
@@ -471,7 +424,7 @@ plt.savefig(gender_plot, bbox_inches='tight')
 plt.close()
 print(f"Saved gender plot : {gender_plot}")
 
-# ── Plot C: visit-date count distribution (histogram) ─────────────────────
+# Plot C: visit-date count distribution (histogram)
 fig3, ax3 = plt.subplots(figsize=(10, 5))
 ax3.hist(dates_per_patient, bins=50, color='#7B68A6', edgecolor='black', linewidth=0.3, alpha=0.85)
 ax3.axvline(x=float(dates_desc['50%']), color='red',    linestyle='--', linewidth=1.5,

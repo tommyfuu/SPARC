@@ -1,14 +1,5 @@
-"""
-Create harmonized race/ethnicity mappings across all datasets.
-Maps all race categories to 6 standard categories:
-1. White
-2. Black or African American
-3. Asian
-4. American Indian or Alaska Native
-5. Native Hawaiian or Other Pacific Islander
-6. Other/Unknown/Refused
-
-Generates harmonized CSVs for all datasets.
+"""Harmonize per-dataset race/ethnicity counts to 6 race categories (White, Black, Asian, AIAN,
+NHPI, Other/Unknown/Refused) and 3 ethnicity categories, and write per-dataset and combined CSVs.
 """
 
 import argparse
@@ -94,15 +85,12 @@ def harmonize_race_csv(input_file, output_file):
     """Harmonize a race CSV file using the mapping."""
     df = pd.read_csv(input_file)
 
-    # Ensure count is numeric
     df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0).astype(int)
 
-    # Apply mapping
     df['harmonized_race'] = df['race_concept_name'].map(RACE_HARMONIZATION_MAP)
 
-    # Check for unmapped categories. These must never be dropped silently:
-    # an unmapped label would become NaN and disappear in the groupby below,
-    # removing those patients from the denominator entirely.
+    # unmapped labels go to Other/Unknown/Refused instead of becoming NaN and
+    # dropping out of the groupby
     unmapped = df[df['harmonized_race'].isna()]
     if not unmapped.empty:
         print(f"  WARNING: Unmapped race categories in {input_file}:")
@@ -116,10 +104,8 @@ def harmonize_race_csv(input_file, output_file):
     harmonized_counts = df.groupby('harmonized_race')['count'].sum().reset_index()
     harmonized_counts.columns = ['race_concept_name', 'count']
 
-    # Sort by count descending
     harmonized_counts = harmonized_counts.sort_values('count', ascending=False)
 
-    # Save
     harmonized_counts.to_csv(output_file, index=False)
 
     return harmonized_counts
@@ -128,13 +114,11 @@ def harmonize_ethnicity_csv(input_file, output_file):
     """Harmonize an ethnicity CSV file using the mapping."""
     df = pd.read_csv(input_file)
 
-    # Ensure count is numeric
     df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0).astype(int)
 
-    # Apply mapping
     df['harmonized_ethnicity'] = df['ethnicity_concept_name'].map(ETHNICITY_HARMONIZATION_MAP)
 
-    # Check for unmapped categories (see note in harmonize_race_csv).
+    # unmapped labels go to Unknown
     unmapped = df[df['harmonized_ethnicity'].isna()]
     if not unmapped.empty:
         print(f"  WARNING: Unmapped ethnicity categories in {input_file}:")
@@ -148,29 +132,23 @@ def harmonize_ethnicity_csv(input_file, output_file):
     harmonized_counts = df.groupby('harmonized_ethnicity')['count'].sum().reset_index()
     harmonized_counts.columns = ['ethnicity_concept_name', 'count']
 
-    # Sort by count descending
     harmonized_counts = harmonized_counts.sort_values('count', ascending=False)
 
-    # Save
     harmonized_counts.to_csv(output_file, index=False)
 
     return harmonized_counts
 
 def main():
-    print("="*80)
+    print()
     print("Creating Harmonized Race/Ethnicity Mappings")
-    print("="*80)
+    print()
 
     args = parse_args()
     base_dir = args.race_ethnicity_dir
     output_dir = args.output_dir or f'{base_dir}/harmonized'
     os.makedirs(output_dir, exist_ok=True)
 
-    # display name -> (input file stem, output file stem)
-    # The input stem is how the raw CSVs are named inside {base_dir}/{display}/;
-    # the output stem is the name downstream scripts expect in harmonized/.
-    # DFCI_CAIA and FHCC_CAIA are the datasets whose raw files carry an
-    # '_all' infix; the rest use the bare stem.
+    # display name -> (raw file stem in {base_dir}/{display}/, output stem in harmonized/)
     datasets = {
         'DFCI_CAIA': ('DFCI_CAIA_all', 'DFCI_CAIA'),
         'EHRSHOT': ('EHRSHOT', 'EHRSHOT'),
@@ -187,9 +165,9 @@ def main():
         'MSK_CAIA_timeshift': ('MSK_CAIA_timeshift', 'MSK_CAIA_timeshift'),
     }
 
-    print("\n" + "="*80)
+    print()
     print("HARMONIZATION MAPPING")
-    print("="*80)
+    print()
     print("\nRace categories will be mapped to:")
     print("  1. White")
     print("  2. Black or African American")
@@ -202,9 +180,9 @@ def main():
     print("  2. Not Hispanic or Latino")
     print("  3. Unknown")
 
-    print("\n" + "="*80)
+    print()
     print("Processing Datasets")
-    print("="*80)
+    print()
 
     all_harmonized_race = Counter()
     all_harmonized_ethnicity = Counter()
@@ -217,31 +195,31 @@ def main():
         if os.path.exists(race_file):
             output_race_file = f"{output_dir}/{output_stem}_race_harmonized.csv"
             harmonized_race = harmonize_race_csv(race_file, output_race_file)
-            print(f"  ✓ Race harmonized → {output_race_file}")
+            print(f"  Race harmonized → {output_race_file}")
 
             # Add to overall counts
             for _, row in harmonized_race.iterrows():
                 all_harmonized_race[row['race_concept_name']] += row['count']
         else:
-            print(f"  ✗ Race file not found: {race_file}")
+            print(f"  Race file not found: {race_file}")
 
         # Process ethnicity
         ethnicity_file = f"{base_dir}/{dataset_display}/{input_stem}_ethnicity.csv"
         if os.path.exists(ethnicity_file):
             output_ethnicity_file = f"{output_dir}/{output_stem}_ethnicity_harmonized.csv"
             harmonized_ethnicity = harmonize_ethnicity_csv(ethnicity_file, output_ethnicity_file)
-            print(f"  ✓ Ethnicity harmonized → {output_ethnicity_file}")
+            print(f"  Ethnicity harmonized → {output_ethnicity_file}")
 
             # Add to overall counts
             for _, row in harmonized_ethnicity.iterrows():
                 all_harmonized_ethnicity[row['ethnicity_concept_name']] += row['count']
         else:
-            print(f"  ✗ Ethnicity file not found: {ethnicity_file}")
+            print(f"  Ethnicity file not found: {ethnicity_file}")
 
     # Create combined summary across all datasets
-    print("\n" + "="*80)
+    print()
     print("Creating Combined Summary")
-    print("="*80)
+    print()
 
     # Combined race
     combined_race_df = pd.DataFrame([
@@ -250,7 +228,7 @@ def main():
     ])
     combined_race_file = f"{output_dir}/ALL_DATASETS_race_harmonized.csv"
     combined_race_df.to_csv(combined_race_file, index=False)
-    print(f"\n✓ Combined race summary saved: {combined_race_file}")
+    print(f"\nCombined race summary saved: {combined_race_file}")
     print("\nCombined race distribution:")
     total_race = combined_race_df['count'].sum()
     for _, row in combined_race_df.iterrows():
@@ -264,16 +242,16 @@ def main():
     ])
     combined_ethnicity_file = f"{output_dir}/ALL_DATASETS_ethnicity_harmonized.csv"
     combined_ethnicity_df.to_csv(combined_ethnicity_file, index=False)
-    print(f"\n✓ Combined ethnicity summary saved: {combined_ethnicity_file}")
+    print(f"\nCombined ethnicity summary saved: {combined_ethnicity_file}")
     print("\nCombined ethnicity distribution:")
     total_ethnicity = combined_ethnicity_df['count'].sum()
     for _, row in combined_ethnicity_df.iterrows():
         pct = 100 * row['count'] / total_ethnicity
         print(f"  {row['ethnicity_concept_name']}: {row['count']:,} ({pct:.1f}%)")
 
-    print("\n" + "="*80)
+    print()
     print("Harmonization Complete!")
-    print("="*80)
+    print()
     print(f"\nAll harmonized files saved to: {output_dir}")
 
 if __name__ == '__main__':

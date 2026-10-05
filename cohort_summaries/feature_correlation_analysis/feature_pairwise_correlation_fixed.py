@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""
-feature_pairwise_correlation_fixed.py
+"""Spearman correlation heatmap of first-available lab/vital values, grouped and colored as in the LIME plots.
 
-Feature pairwise correlation analysis for SPARC parsimonious module.
-
-Computes Spearman correlation of the first available lab / vital values
-and plots heatmaps with clinical category grouping and color-coding
-(matching LIME feature importance visualization style).
-
-Supported datasets:
-    MSK, MSK_CAIA, MSK_timeshift, MSK_CAIA_timeshift, StanfordEHRSHOT, MIMICIV_hosp
-
-Usage examples:
+Datasets: MSK, MSK_CAIA, MSK_timeshift, MSK_CAIA_timeshift, StanfordEHRSHOT, MIMICIV_hosp.
+Usage:
     python feature_pairwise_correlation_fixed.py -ds MSK_CAIA -m parsimonious
     python feature_pairwise_correlation_fixed.py -ds MSK_CAIA -cp entire -m parsimonious
 """
@@ -29,12 +20,9 @@ matplotlib.rcParams['font.family'] = 'Arial'
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# ---------------------------------------------------------------------------
-# Path setup — resolve SPARC/data so dataset_loading.py is importable
-# ---------------------------------------------------------------------------
+# path setup: resolve SPARC/data so dataset_loading.py is importable
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))          # …/cohort_summaries
-# Walk up to the repo root (the directory holding both data/ and models/) so this
-# works regardless of how deep the script sits.
+# walk up to the repo root (holds data/ and models/)
 _SPARC_ROOT = _SCRIPT_DIR
 while _SPARC_ROOT != os.path.dirname(_SPARC_ROOT) and not all(
         os.path.isdir(os.path.join(_SPARC_ROOT, _d)) for _d in ('data', 'models')):
@@ -44,7 +32,7 @@ _DATA_DIR   = os.path.join(_SPARC_ROOT, 'data')                   # …/SPARC/da
 for _p in [_DATA_DIR]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -61,9 +49,7 @@ from MSK_featurename_list import (
     RBC_CBC_TESTS, BMP_TESTS, LFT_TESTS
 )
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
+# argument parsing
 parser = argparse.ArgumentParser(
     prog='feature_pairwise_correlation_fixed',
     description='Pairwise feature correlation heatmap for parsimonious module',
@@ -107,9 +93,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# ---------------------------------------------------------------------------
-# Resolve parameters
-# ---------------------------------------------------------------------------
+# resolve parameters
 dataset = args.dataset
 modules = args.modules
 
@@ -138,9 +122,7 @@ print(f"Dataset            : {dataset}")
 print(f"Modules            : {modules}")
 print(f"Output directory   : {out_dir}")
 
-# ---------------------------------------------------------------------------
-# Load data via dataset_loading.py
-# ---------------------------------------------------------------------------
+# load data via dataset_loading.py
 print(f"\nLoading dataset '{dataset_load}' (normalize=False, modules={modules}, option=binary)…")
 
 data_dict_lab_dict, _, split_dict, _, _ = load_dataset(
@@ -176,9 +158,7 @@ cbc_differential_dict = data_dict_lab_dict.get('cbc_differential', {})  # Only p
 age_dict             = data_dict_lab_dict.get('age',    {})   # {pid: [age_binned_5]}
 gender_dict          = data_dict_lab_dict.get('gender', {})   # {pid: [female_oh]}  (MALE reduced)
 
-# ---------------------------------------------------------------------------
-# Build per-patient first-value feature vectors
-# ---------------------------------------------------------------------------
+# build per-patient first-value feature vectors
 _INVALID_STRS = frozenset({None, 'NA', 'nan', 'NAN', 'TNP', 'Negative', ''})
 
 def _try_float(v):
@@ -202,12 +182,11 @@ for pid in all_patient_ids:
     if not all_dates:
         continue
 
-    # Initialise feature containers with None
     lab_vals   = {name: None for name in BASIC_TESTS}
     vital_vals = {name: None for name in BASIC_VITALS}
     cbc_vals   = {name: None for name in CBC_DIFFERENTIAL_TESTS} if cbc_differential_dict else {}
 
-    # Walk dates ascending; for each feature take the first non-null value
+    # Walk dates ascending: for each feature take the first non-null value
     for date in sorted(all_dates):
         if date in basic_lab_dict.get(pid, {}):
             measurements = basic_lab_dict[pid][date]
@@ -234,7 +213,7 @@ for pid in all_patient_ids:
                     if fv is not None:
                         cbc_vals[feat_name] = fv
 
-    # Demographics — age at first lab measurement (consistent with dataset_summaries_fixed.py)
+    # Demographics: age at first lab measurement (consistent with dataset_summaries_fixed.py)
     age_val = None
     if pid in age_dict and age_dict[pid]:
         try:
@@ -254,7 +233,6 @@ for pid in all_patient_ids:
 
     female_val = _try_float(gender_dict[pid][0]) if (pid in gender_dict and gender_dict[pid]) else None
 
-    # Build record with all features
     record = {
         'gender': female_val,
         'age at seq': age_val,
@@ -272,18 +250,10 @@ for pid in all_patient_ids:
 
 print(f"Patients with at least one recorded date: {len(records):,}")
 
-# ---------------------------------------------------------------------------
-# Build DataFrame with clinical grouping order
-# ---------------------------------------------------------------------------
+# build DataFrame with clinical grouping order
 feature_df = pd.DataFrame.from_dict(records, orient='index')
 
-# Clinical grouping order (matching LIME plots):
-#   1. Demographics (gender, age)
-#   2. CBC (RBC panel)
-#   3. CBC Differential (if present)
-#   4. BMP
-#   5. LFT
-#   6. Vitals
+# order as in LIME plots: demographics, CBC, CBC differential, BMP, LFT, vitals
 
 col_order = ['gender', 'age at seq']
 
@@ -313,16 +283,13 @@ for test in BASIC_VITALS:
     if test in feature_df.columns:
         col_order.append(test)
 
-# Reorder DataFrame
 col_order = [c for c in col_order if c in feature_df.columns]
 feature_df = feature_df[col_order]
 
 n_valid = feature_df.notna().any(axis=1).sum()
 print(f"Patients with at least one non-NaN feature: {n_valid:,}")
 
-# ---------------------------------------------------------------------------
-# Display names (matching LIME plots)
-# ---------------------------------------------------------------------------
+# display names (matching LIME plots)
 FEATURE_DISPLAY_NAMES = {
     'gender': 'Gender',
     'age at seq': 'Age',
@@ -370,20 +337,9 @@ FEATURE_DISPLAY_NAMES = {
 
 display_names = [FEATURE_DISPLAY_NAMES.get(c, c) for c in col_order]
 
-# ---------------------------------------------------------------------------
-# Color coding (matching LIME plots)
-# ---------------------------------------------------------------------------
+# color coding (matching LIME plots)
 def get_feature_colors(feature_names):
-    """Assign colors to features based on clinical category.
-
-    Color scheme (matching LIME plots):
-    - Demographics (Gender, Age): gray
-    - CBC (RBC panel): red
-    - CBC Differential: pink
-    - BMP: green
-    - LFT: orange
-    - Vitals: blue
-    """
+    """Color features by clinical category: demographics gray, CBC red, CBC diff pink, BMP green, LFT orange, vitals blue."""
     colors = []
 
     for name in feature_names:
@@ -406,15 +362,11 @@ def get_feature_colors(feature_names):
 
 feature_colors = get_feature_colors(col_order)
 
-# ---------------------------------------------------------------------------
-# Compute correlation matrix
-# ---------------------------------------------------------------------------
+# compute correlation matrix
 print("Computing Spearman correlation matrix…")
 correlation_matrix = feature_df.corr(method='spearman')
 
-# ---------------------------------------------------------------------------
-# Filter out features with < 100 patients
-# ---------------------------------------------------------------------------
+# filter out features with < 100 patients
 min_patients = 100
 patient_counts = feature_df.notna().sum()
 features_below_threshold = patient_counts[patient_counts < min_patients].index.tolist()
@@ -432,13 +384,10 @@ if features_below_threshold:
 else:
     print(f"\nAll features have >= {min_patients} patients")
 
-# Rename for display
 correlation_matrix.index = display_names
 correlation_matrix.columns = display_names
 
-# ---------------------------------------------------------------------------
-# Plot: Full correlation heatmap with color-coded labels
-# ---------------------------------------------------------------------------
+# full correlation heatmap with color-coded labels
 n_feats = len(correlation_matrix)
 fig_size = max(14, n_feats * 0.6)
 

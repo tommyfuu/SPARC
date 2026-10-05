@@ -1,68 +1,7 @@
 #!/usr/bin/env python3
-"""
-build_demographics_table.py
-
-Single entry point for the SPARC dataset demographics table. Replaces the
-three-step pipeline that used to be:
-
-    demographics_table.py               -> demographics_table.csv
-        (manual rename / reorder of rows and columns)
-    Table S1 Dataset Demographics.csv
-    add_cancer_type_and_race_counts.py  -> ..._with_ctypes_and_race.csv
-
-The manual middle step existed only because the two scripts used different
-dataset naming schemes ('MSK_CAIA' vs 'MSK', 'INSIGHT_A' vs 'INSIGHT-A',
-'StanfordEHRSHOT' vs 'EHRSHOT'). Both schemes now come from one DATASETS
-registry below, so the final table is produced in a single run.
-
-Outputs (--format, default 'both')
-----------------------------------
-  pct     demographics_table.csv
-          Percentages, one row per dataset, folder-style names. Race and
-          ethnicity as % of their own extract.
-  counts  SPARC_Supplementary_Tables - Table S1 Dataset Demographics_with_ctypes_and_race.csv
-          Raw counts, publication row order and display names, with an
-          explicit 'Race/ethnicity denominator' column and the cancer-type
-          breakdown appended.
-
-Conventions preserved from the original scripts
------------------------------------------------
-* Suppressed cells stay verbatim ('n<=10' / '<=10') rather than becoming 0,
-  so a row's race columns will not always sum to its denominator.
-* "No extract at all" is a blank cell; a category absent from an extract that
-  does exist is a real zero. The two tables differ here, deliberately, and both
-  behaviours are preserved:
-    - counts table: absent category / age bin -> 0
-    - pct table:    absent category / age bin -> blank
-* The two tables also label age bins differently, which is why the manual
-  rename step existed. Preserved as-is:
-    - counts table: 'Age <=4', 'Age 5-9' (ASCII hyphen), 'Age>=85' (no space)
-    - pct table:    'Age ≤4',  'Age 5–9' (en dash),      'Age ≥85'
-* The race/ethnicity denominator is taken from the *ethnicity* table: it has
-  3 categories and rarely suppresses, whereas race tables routinely do, which
-  would make a race-derived total read low.
-* The 29+1 cancer-type columns do NOT partition patients. A patient with
-  several parent types tied for their earliest diagnosis day is counted once
-  under each tied type, inflating the row sum by ~14-23%. The 'Total patients
-  with >=1 mapped cancer type' column is the real per-site denominator.
-* Age bins below 5 are folded into '<=4' and 85+ into '>=85'.
-
-Consistency report
-------------------
---check (default on) prints a report at the end flagging rows where a
-denominator exceeds the dataset's patient count. Two such discrepancies are
-known and have different causes:
-
-  * race/ethnicity denominator > # patients -- the site extract covers a
-    wider population than the modelling cohort. Fixed for MSK / MSK
-    (prospective) / MIMICIV-hosp / INSIGHT-* by generate_race_ethnicity_cohort.py,
-    which needs a patient-level {id: (race, ethnicity)} pickle. JHU-CAIA and
-    FHCC-CAIA were re-extracted 2026-09-17 and now agree; re-run the
-    harmonization step to propagate.
-  * cancer-type total > # patients -- ctypes_<SITE>_summary.txt counts the
-    source pickle, not the cohort (MSK: 237,448 in the pickle vs 224,047 in
-    the cohort). Not yet fixed; needs the cancer-type pickle intersected with
-    the cohort the way the race path does.
+"""Build the SPARC dataset demographics table: demographics_table.csv (percentages) and/or the
+Table S1 counts CSV with race/ethnicity denominators and cancer-type counts. Suppressed cells
+('n<=10') are kept verbatim; --check flags denominators larger than the cohort.
 """
 
 import argparse
@@ -74,15 +13,12 @@ import sys
 
 import pandas as pd
 
-# ctypes_parse stays in cohort_summaries/: it is shared with the cancer-type
-# visualisation scripts (cancer_type_vis.py and friends, not yet ported into
-# this repo), so it is imported from the parent directory rather than copied.
-_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PARENT not in sys.path:
-    sys.path.insert(0, _PARENT)
+# shared ctypes_parse from cohort_summaries/cancer_types/
+_CTYPES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cancer_types')
+if _CTYPES not in sys.path:
+    sys.path.insert(0, _CTYPES)
 
-# ctypes_parse owns the cancer-type input location so every cancer-type script
-# agrees on one path. Both honour SPARC_CANCER_TYPES_DIR / SPARC_CANCER_TYPES_OUT.
+# cancer-type paths honour SPARC_CANCER_TYPES_DIR / SPARC_CANCER_TYPES_OUT
 from ctypes_parse import (DATA_DIR as CTYPES_DIR, OUTPUT_DIR as CTYPES_OUT_DIR,
                           CANCER_TYPES_LIST_PATH)
 
@@ -91,22 +27,13 @@ DEFAULT_SOURCE_DIR = (
     'results_vis/cohort_summaries'
 )
 
-# ---------------------------------------------------------------------------
-# One registry replacing extract_dataset_name_from_folder(),
-# map_dataset_name_to_race_file(), DATASET_TO_RACE_STEM and
-# DATASET_TO_CTYPES_STEM. Order here is the publication row order.
-#   display     name in the counts table
-#   pct_name    name in the percentages table (folder-derived, kept for
-#               backwards compatibility with existing consumers)
+# dataset registry, in publication row order
+#   display     name in the counts table (label only, not used for file lookup)
+#   pct_name    name in the percentages table
 #   folder      subdirectory of dataset_summaries/
 #   race        harmonized/<race>_{race,ethnicity}_harmonized.csv stem
 #   ctypes      ctypes_<ctypes>_summary.txt stem
-# 'display' is the published label only: it is never used to locate a file,
-# so renaming a dataset here cannot break input lookup (the race/ctypes
-# stems are separate fields). Renamed 2026-09-17: DFCI-CAIA -> CAIA-DFCI,
-# FHCC-CAIA -> CAIA-FHCC, JHU-CAIA -> CAIA-JHU, MIMICIV-hosp -> 'MIMIC IV-hosp'.
-# None means "no extract exists" -> blank cells, not zeros.
-# ---------------------------------------------------------------------------
+# None means no extract exists -> blank cells, not zeros.
 DATASETS = [
     dict(display='MSK',               pct_name='MSK_CAIA',
          folder='parsimonious_MSK_CAIA',           race='MSK_CAIA',           ctypes='MSK'),
@@ -171,9 +98,7 @@ TOTAL_PATIENTS_RE = re.compile(
 SUPPRESSED = 'n<=10'
 
 
-# ---------------------------------------------------------------------------
 # small helpers
-# ---------------------------------------------------------------------------
 def is_suppressed(cell):
     s = str(cell).strip().lower()
     return '<=' in s or '<' in s or 'suppress' in s
@@ -196,9 +121,7 @@ def _first_glob(folder, pattern):
     return hits[0] if hits else None
 
 
-# ---------------------------------------------------------------------------
 # readers
-# ---------------------------------------------------------------------------
 def read_dataset_summary(folder):
     """n_patients / pct_male / age mean+std (converted from 5-year bins)."""
     path = (_first_glob(folder, 'dataset_summary_*.csv')
@@ -216,13 +139,8 @@ def read_dataset_summary(folder):
 
 
 def read_age_bins(folder):
-    """({bin_label: suppressed_count}, file_found).
-
-    Labels keep their source form ('5–9' with an en dash); each output
-    formats them to its own convention. <5 folds into 'LE4', 85+ into 'GE85'.
-    file_found distinguishes "no age file" (blank cells) from "bin absent
-    from an existing file" (a real zero).
-    """
+    """({bin_label: suppressed_count}, file_found). <5 folds into 'LE4', 85+ into 'GE85';
+    file_found=False means no age file (blank cells rather than zeros)."""
     path = _first_glob(folder, 'age_distribution_*.csv')
     if path is None:
         return {}, False
@@ -231,8 +149,7 @@ def read_age_bins(folder):
     for _, row in df.iterrows():
         label, count = str(row['age_group_years']), row['count']
         if isinstance(count, str):
-            # A suppressed cell contributes its midpoint when folded into an
-            # aggregate bin; the aggregate is re-suppressed below anyway.
+            # suppressed cells contribute their midpoint to folded bins
             count = 5 if is_suppressed(count) else _to_float(count, 5)
         if label.startswith('-') or label in ('0-4', '0–4'):
             young += count
@@ -276,7 +193,7 @@ def read_harmonized(race_dir, stem, kind):
 
 
 def race_denominator(eth_cells):
-    """Ethnicity total -- see the module docstring for why not race."""
+    """Ethnicity total; used as the denominator because race tables are suppressed more often."""
     if not eth_cells:
         return None
     return sum(int(v) for v in eth_cells.values() if v.isdigit())
@@ -315,9 +232,7 @@ def load_named_types():
     return [t for t in types if t != 'Unknown Primary']
 
 
-# ---------------------------------------------------------------------------
 # collection
-# ---------------------------------------------------------------------------
 def collect(summaries_dir, race_dir):
     """One record per registry entry, with everything read but nothing formatted."""
     records = []
@@ -371,9 +286,7 @@ def sorted_age_bins(records):
     return sorted(labels, key=key)
 
 
-# ---------------------------------------------------------------------------
 # output: percentages
-# ---------------------------------------------------------------------------
 def build_pct_table(records, age_labels):
     rows = []
     for r in records:
@@ -403,16 +316,12 @@ def build_pct_table(records, age_labels):
         for label in age_labels:
             row[age_label(label, 'pct')] = r['age_bins'].get(label, '')
         rows.append(row)
-    # the percentages table was historically ordered alphabetically by its
-    # own dataset label, not in publication order; preserved so existing
-    # consumers of demographics_table.csv see no change.
+    # percentages table is sorted alphabetically by dataset label
     rows.sort(key=lambda r: r['Dataset'])
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
 # output: counts (Table S1 style)
-# ---------------------------------------------------------------------------
 def build_counts_table(records, age_labels, named_types):
     header = (['Dataset', '# Patients', 'Male (%)', 'Age at First Lab (mean ± std)',
                'Race/ethnicity denominator']
@@ -451,13 +360,11 @@ def build_counts_table(records, age_labels, named_types):
     return header, rows
 
 
-# ---------------------------------------------------------------------------
 # consistency report
-# ---------------------------------------------------------------------------
 def report(records):
-    print('\n' + '=' * 78)
+    print()
     print('CONSISTENCY REPORT')
-    print('=' * 78)
+    print()
     print(f"{'dataset':<20}{'# patients':>11}{'race denom':>12}{'ctype total':>13}  flags")
     print('-' * 78)
     issues = []
@@ -481,13 +388,12 @@ def report(records):
     if not issues:
         print('No denominator exceeds its dataset patient count.')
     else:
-        print(f'{len(issues)} discrepancies -- a denominator aggregated over a wider')
-        print('population than the modelling cohort. See the module docstring for')
-        print('which are fixed, which need a re-run, and which need source data.')
+        print(f'{len(issues)} discrepancies: a denominator aggregated over a wider')
+        print('population than the modelling cohort (race extract or cancer-type')
+        print('summary not restricted to the cohort).')
     return issues
 
 
-# ---------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(
         description='Build the SPARC dataset demographics table(s).')
@@ -518,8 +424,7 @@ def main():
     race = args.race_ethnicity_dir or os.path.join(args.source_dir,
                                                    'race_ethnicity', 'harmonized')
     out_dir = args.out_dir or args.source_dir
-    # The counts table historically lives beside the ctypes inputs, not in the
-    # cohort_summaries root; -o alone must not silently relocate it.
+    # counts table defaults to the cancer-type output dir
     counts_dir = args.counts_out_dir or (args.out_dir if args.out_dir
                                          else CTYPES_OUT_DIR)
 

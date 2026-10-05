@@ -1,44 +1,9 @@
 """
-Standalone summary tool: counts patients per first-mapped parent cancer type.
+Count patients per first-mapped parent cancer type in each
+DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_<dataset>.pickle found under SCAN_ROOTS.
+Takes no CLI args and runs main() at import, so it can be exec'd by a harness.
 
-Reads every DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_<dataset>.pickle it can
-find, shape:
-    {person_id: {day_delta: [parent_cancer_type, ...]}}
-
-and reports, for each patient, the parent cancer type(s) recorded at their
-EARLIEST day_delta (their first mapped cancer type). If more than one parent
-type first appears on that same earliest day, the patient is counted once
-under each of those types (co-first-appearance), and separately under a
-combined "type_a + type_b" label so ties aren't silently double counted
-without a way to see them.
-
-Output
-------
-Everything is printed to stdout (so it shows up in a terminal / job log) AND,
-unless WRITE_TXT is turned off, written to one plain-text report per input
-pickle:
-
-    DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_insight_A.pickle
-        -> ctypes_INSIGHT-A_summary.txt
-
-The file lands next to its pickle unless OUTPUT_DIR is set.
-
-Usage — just run it, no arguments/CLI flags at all:
-    python cancer_type_summary.py
-
-This scans a set of candidate root directories (cwd, /output, /input,
-/external_data, or $SPARC_OUTPUT_DIR if set) for files matching
-FILENAME_PATTERN and processes ALL of them, so a single run covers every
-institution A-F. Set PICKLE_PATHS to target specific files instead.
-
-Deliberately takes no CLI arguments (no argparse) — this is meant to be
-dropped as-is into execution harnesses (e.g. a Rhino Code Object) that may
-invoke it with their own extra argv; argparse would reject unrecognized
-flags and abort before printing anything.
-
-main() runs unconditionally at import time (no `if __name__ == '__main__'`
-guard) so it also executes when a harness imports/execs this file as a
-module rather than running it as a script.
+Usage: python cancer_type_summary.py
 """
 import fnmatch
 import os
@@ -52,10 +17,7 @@ FILENAME_PATTERN = 'DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_*.pickle'
 # Everything before the dataset tag in that filename.
 FILENAME_PREFIX = 'DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_'
 
-# Root directories the auto-scan walks, in priority order. Only existing
-# directories are actually scanned. Covers both a typical local run
-# (an output dir under cwd) and a locked-down/mounted environment (Rhino-style
-# /input, /output, /external_data mounts).
+# Roots the auto-scan walks, in priority order; missing ones are skipped.
 SCAN_ROOTS = [
     os.environ.get('SPARC_OUTPUT_DIR'),
     os.getcwd(),
@@ -82,18 +44,13 @@ TXT_NAME_TEMPLATE = 'ctypes_{tag}_summary.txt'
 # Set to True to also list every patient id grouped by cancer type.
 LIST_PATIENTS = False
 
-# Set to False to skip the "what is actually mounted" dump. Off by default
-# here because os.walk over a large repo checkout is slow and drowns the
-# report; turn it on when debugging a harness that mounts unknown inputs.
+# Dump every file under the scan roots (slow on a large checkout; for debugging).
 PRINT_MOUNTED_INPUTS = False
 
 
 def find_cancer_types_pickles(scan_roots=None, pattern=FILENAME_PATTERN):
-    """
-    Walk scan_roots looking for files matching `pattern`. Returns ALL matches,
-    de-duplicated by real path (the roots overlap in practice) and sorted by
-    filename so institutions come out in A-F order.
-    """
+    """Find all files matching `pattern` under scan_roots, de-duplicated by
+    real path and sorted by filename."""
     found = {}
     for root in (scan_roots or SCAN_ROOTS):
         if not root or not os.path.isdir(root):
@@ -107,12 +64,7 @@ def find_cancer_types_pickles(scan_roots=None, pattern=FILENAME_PATTERN):
 
 
 def dataset_tag(pickle_path):
-    """
-    'DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_insight_A.pickle' -> 'INSIGHT-A'
-
-    Anything that isn't an insight_<site> file keeps its own stem, so e.g.
-    the MSK_CAIA pickles produce ctypes_MSK_CAIA_till2021_050726_summary.txt.
-    """
+    """'..._insight_A.pickle' -> 'INSIGHT-A'; other files keep their stem."""
     stem = os.path.basename(pickle_path)
     if stem.startswith(FILENAME_PREFIX):
         stem = stem[len(FILENAME_PREFIX):]
@@ -124,12 +76,7 @@ def dataset_tag(pickle_path):
 
 
 def print_mounted_inputs(emit, roots=None):
-    """
-    Print every file found under each candidate root (cwd, /output, /input,
-    /external_data, $SPARC_OUTPUT_DIR) so a job log always shows exactly
-    what's actually mounted/available, even if the pickle search below finds
-    nothing or the job errors out afterward.
-    """
+    """List every file under each candidate root, to show what is mounted."""
     sep = '=' * 78
     emit(f'\n{sep}')
     emit('MOUNTED INPUTS (all files under each candidate root)')
@@ -161,24 +108,9 @@ def load_cancer_types_dict(pickle_path):
 
 
 def summarize_first_cancer_types(cancer_types_dict):
-    """
-    For each patient, find the parent cancer type(s) at their earliest
-    day_delta and tally patient counts per type.
-
-    Returns:
-        single_type_counts: Counter {parent_cancer_type: n_patients} —
-            counts a patient once under EACH type present on their earliest
-            day (so a patient with a same-day tie is counted under both).
-        combined_label_counts: Counter {"Type A" or "Type A + Type B": n} —
-            counts each patient exactly once, using a combined label when
-            multiple types tied for first appearance.
-        n_patients_total: total patients in the dict.
-        n_patients_multi_first: patients whose first day had >1 parent type.
-        patients_by_type: dict {parent_cancer_type: [pid, ...]} — same
-            multi-counting rule as single_type_counts.
-        patients_by_combined_label: dict {combined_label: [pid, ...]} —
-            each patient appears in exactly one list.
-    """
+    """Tally patients by the parent cancer type(s) at their earliest day_delta.
+    single_type_counts counts same-day ties under each type; combined_label_counts
+    uses an "A + B" label so each patient is counted once."""
     single_type_counts = Counter()
     combined_label_counts = Counter()
     patients_by_type = {}            # parent_cancer_type -> [pid, ...]
@@ -220,7 +152,7 @@ def summarize_first_cancer_types(cancer_types_dict):
 
 def print_patients_by_type(emit, patients_by_combined_label):
     """Print every patient id grouped under its first-mapped cancer type
-    (combined label — each patient listed exactly once)."""
+    (combined label; each patient listed exactly once)."""
     sep = '=' * 78
     emit(f'\n{sep}')
     emit('PATIENTS BY CANCER TYPE (first-mapped, one row per patient)')

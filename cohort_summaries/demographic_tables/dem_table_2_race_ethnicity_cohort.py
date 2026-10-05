@@ -1,34 +1,8 @@
 """
-Generate cohort-restricted race/ethnicity summary CSVs for a SPARC dataset.
+Race/ethnicity summary CSVs restricted to the cohort load_dataset() returns,
+in the schema 11_create_harmonized_race_ethnicity.py reads. Small cells are 'n<=10'.
 
-Why this script exists
-----------------------
-The site-level race/ethnicity export covers every patient in the raw MSK
-extract. The SPARC modelling cohort is smaller: `caia_portion='prior'`
-truncates each patient's labs to dates <= their cutoff day and then drops
-patients whose lab record is empty afterwards, and `_load_caia()` finally
-restricts every dict to `shared['labs'].keys()`. For MSK-CAIA that is:
-
-    Removed 4708 patients with no labs data after prior filtering
-    (228755 -> 224047)
-
-So aggregating the raw export produces 228,755 people while the cohort has
-224,047, and the demographics table then mixes two populations in one row.
-
-This script aggregates from a *patient-level* race/ethnicity map restricted to
-the cohort that `load_dataset()` actually returns, so the totals match
-`n_patients` in the dataset summary by construction — for any caia_portion, and
-for any future change to the cohort definition.
-
-Output matches the schema the harmonizer consumes
-(`11_create_harmonized_race_ethnicity.py`):
-    MSK_CAIA_race.csv        race_concept_name,count
-    MSK_CAIA_ethnicity.csv   ethnicity_concept_name,count
-
-Small cells are suppressed as 'n<=10', consistent with the existing files.
-
-Usage
------
+Usage:
     # MSK-CAIA (defaults)
     python generate_race_ethnicity_cohort.py
 
@@ -47,11 +21,8 @@ import pickle
 import sys
 from collections import Counter
 
-# ---------------------------------------------------------------------------
-# Path setup — resolve SPARC/data so dataset_loading.py is importable
-# ---------------------------------------------------------------------------
+# make SPARC/data importable for dataset_loading.py
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))          # …/cohort_summaries/demographic_tables
-# two levels up now that this lives in a subfolder: demographic_tables -> cohort_summaries -> SPARC
 _SPARC_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))       # …/SPARC
 _DATA_DIR = os.path.join(_SPARC_ROOT, 'data')                     # …/SPARC/data
 
@@ -103,11 +74,7 @@ def parse_args():
 
 
 def get_cohort_ids(args):
-    """Return the patient IDs load_dataset() actually yields for this cohort.
-
-    Mirrors dataset_summaries_fixed.py exactly so that the totals here and
-    n_patients there cannot drift apart.
-    """
+    """Patient IDs load_dataset() yields for this cohort (same call as dataset_summaries_fixed.py)."""
     print(f"Loading dataset '{args.dataset}' "
           f"(modules={args.modules}, caia_portion={args.caia_portion})…")
     _, _, split_dict, _, _ = load_dataset(
@@ -192,7 +159,7 @@ def main():
     print(f"With race/ethnicity record : {n_race:,}")
     if missing:
         print(f"WARNING: {missing:,} cohort patients absent from the "
-              f"patient-level map — they are omitted from the counts, so the "
+              f"patient-level map; they are omitted from the counts, so the "
               f"totals below fall short of the cohort size by that amount.")
     print(f"Race total                 : {n_race:,}")
     print(f"Ethnicity total            : {n_eth:,}")
