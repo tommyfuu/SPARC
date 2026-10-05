@@ -1,10 +1,5 @@
 #%%
-"""
-SPARC_train_inf_risk_fixed.py
-
-Training / evaluation entry point for SPARC infusion-risk models.
-All data-loading logic lives in data/dataset_loading.py and is imported here.
-"""
+"""Train / evaluate SPARC infusion-risk models. Data loading lives in data/dataset_loading.py."""
 import os
 import sys
 import copy
@@ -18,7 +13,7 @@ import statsmodels.api as sm
 def is_checkpoint_corrupted(ckpt_path):
     """Check if a checkpoint file is corrupted by attempting to load it."""
     if not os.path.exists(ckpt_path):
-        return False  # Non-existent file is not corrupted, just missing
+        return False  # missing, not corrupted
 
     try:
         torch.load(ckpt_path, map_location='cpu', weights_only=False)
@@ -26,11 +21,11 @@ def is_checkpoint_corrupted(ckpt_path):
     except RuntimeError as e:
         if 'PytorchStreamReader failed reading zip archive' in str(e) or 'failed finding central directory' in str(e):
             return True
-        raise  # Re-raise if it's a different error
+        raise
     except Exception:
-        return True  # Consider other exceptions as corruption too
+        return True
 
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -41,12 +36,12 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
         sys.path.insert(0, _p)
 import sparc_paths
 from data_loaders_inf_risk_fixed import *
-from dataset_loading import load_dataset   # <-- all data loading in one place
+from dataset_loading import load_dataset
 
 from SPARC_inf_risk_modular import *
 
 
-# Argument parsing
+# Arguments
 import argparse
 parser = argparse.ArgumentParser(
     prog='SPARC_train',
@@ -74,15 +69,18 @@ parser.add_argument("-lo",  "--loss_option",             type=str,              
 parser.add_argument("-sd",  "--schedule_option",         type=str,                              default='default',   help='default (adamw constant) | reduce_on_plateau')
 parser.add_argument("-crd", "--competing_risk_death_check", type=str,                           default='False',     help='True | False')
 parser.add_argument("-gcsf","--include_gcsf",            type=str,                              default='False',     help='True | False — include GCSF administration as a feature')
-parser.add_argument("-tp",  "--time_processing",         type=str,                              default='attention',     help='minmaxmean | attention: determines how time is processed in the model postprocessing (minmaxmean: min-max scale + add mean time as feature; attention: use attention-based time encoding)')
+parser.add_argument("-tp",  "--time_processing",         type=str,                              default='attention', choices=['attention'], help="attention (only supported value; kept so existing launchers' -tp attention still parses)")
 parser.add_argument("-qt",  "--quick_test",              type=str,                              default='False',     help='True | False — if True, runs a quick test with 1 epoch and a small subset of the data (for testing the code pipeline)')
 parser.add_argument("-cp",  "--caia_portion",            type=str,                              default='prior',     help='prior | post | entire - which portion of MSK_CAIA dataset to use (only relevant if dataset is MSK_CAIA) wrt 2021')
 parser.add_argument("-cdw", "--change_detection_weight", type=float,                            default=0.1,         help='Weight for auxiliary change detection loss in pretraining (default 0.1)')
 parser.add_argument("-esp", "--early_stop_patience",     type=int,                              default=0,          help='Early stopping patience in epochs (default 50 for pretraining, 30 recommended for finetuning). Set to 0 to disable.')
 parser.add_argument("-lr",  "--learning_rate",           type=float,                            default=1e-4,        help='Learning rate (default 1e-4; for linear probe consider 1e-3 or 1e-2)')
+parser.add_argument("-mm",  "--missing_mask",             type=str,                              default='True',      choices=['True'],      help="True (only supported value; the -10 sentinel no-mask path was removed)")
 parser.add_argument("-umt", "--use_module_tokenizer",    type=str,                              default='False',     help='True | False — use per-clinical-module input tokenization (erythroid/myeloid/renal/hepatic) with missingness gating')
 parser.add_argument("-uct", "--use_continuous_time",     type=str,                              default='True',      help='True | False — add learned continuous-time embedding from actual time values')
 parser.add_argument("-pmd", "--post_mlp_dropout",        type=float,                            default=-1.0,        help='Dropout for post-transformer representation MLP (default: same as model dropout, i.e. 0.1). Set >=0 to override.')
+parser.add_argument("-traw","--time_as_raw_feature",     type=str,                              default='False',     help='True | False — feed elapsed time as a raw scalar through a linear map. Use with -uct False to test time-as-feature WITHOUT the Fourier embedding.')
+parser.add_argument("-bf",  "--batch_first",             type=str,                              default='True',     help='True | False — build the transformer with batch_first=True so it attends over time (all reported models).')
 parser.add_argument("-wbce","--weighted_bce",            type=str,                              default='True',      help='True | False — use WeightedBCELoss (pos_weight=n_neg/n_pos) to handle class imbalance; False uses standard BCE')
 
 #%%
@@ -111,25 +109,27 @@ loss_option         = args.loss_option
 schedule_option     = args.schedule_option
 competing_risk_death_check = args.competing_risk_death_check.lower() == 'true'
 include_gcsf        = args.include_gcsf.lower() == 'true'
-time_processing     = args.time_processing
+time_processing     = args.time_processing   # 'attention' (enforced by argparse choices)
 quick_test          = args.quick_test.lower() == 'true'
 caia_portion       = args.caia_portion.lower()
 change_detection_weight = args.change_detection_weight
 early_stop_patience = args.early_stop_patience
 learning_rate       = args.learning_rate
+missing_mask        = args.missing_mask.lower() == 'true'   # always True (enforced by argparse choices)
 use_module_tokenizer = args.use_module_tokenizer.lower() == 'true'
+batch_first          = args.batch_first.lower() == 'true'   # default True
+time_as_raw_feature  = args.time_as_raw_feature.lower() == 'true'
 use_continuous_time  = args.use_continuous_time.lower() == 'true'
 post_mlp_dropout     = None if args.post_mlp_dropout < 0 else args.post_mlp_dropout
 weighted_bce         = args.weighted_bce.lower() == 'true'
 
 # Fixed settings; no launcher varies these.
-missing_mask          = True    # every 060726 model was trained with the mask
 control_confounds     = False   # -> DataModule control_lack_confounds
 side_effect_censoring = False   # stored by the loader, never read
 premed_only           = False   # -> DataModule premed_only
 resume                = False   # real value is derived from last.ckpt below
 
-# Parse medication list  (supports comma and + separators)
+# medication list, comma or + separated
 med_of_choice = med_of_choice.split(',')
 med_of_choice = [m.strip() for m in med_of_choice]
 result_meds = []
@@ -141,19 +141,19 @@ for med_str in med_of_choice:
 med_of_choice = result_meds
 print("med_of_choice:", med_of_choice)
 
-## HYPERPARAMETERS ##
+# Hyperparameters
 batch_size = 512
 
 # Override option when scheme == 'pretrain'
 if scheme == 'pretrain' and option != 'pretrain' and mode != 'test':
     option = 'pretrain'
-    print("Warning: scheme is pretrain — option overridden to 'pretrain'")
+    print("Warning: scheme is pretrain; option overridden to 'pretrain'")
 
 
 if valfold not in range(10):
     raise ValueError('valfold must be between 1 and 10 (11th fold is the held-out test set)')
 
-# Load data  (all loading/normalization/splitting is in dataset_loading.py)
+# Load data
 print("Loading dataset …")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
@@ -172,7 +172,7 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 print("modular_featuredim_dict", modular_featuredim_dict)
 print("current validation fold:", valfold)
 
-# Build per-module tokenizer config (optional, for use_module_tokenizer=True)
+# Per-module tokenizer config (use_module_tokenizer=True only)
 module_index_cfg = None
 n_static_features = 0
 if use_module_tokenizer:
@@ -194,7 +194,7 @@ if use_module_tokenizer:
 pl.seed_everything(rseed)
 print("med of choice", med_of_choice)
 
-# Override add_num_infusion for binary tasks (infusion numbers only relevant for side-effect tasks)
+# infusion number is only meaningful for side-effect tasks
 if option in ['binary', 'binary_icu_pre', 'binary_risk'] and add_num_infusion:
     print(f"WARNING: add_num_infusion=True is not applicable for task '{option}'. Setting to False.")
     add_num_infusion = False
@@ -220,7 +220,7 @@ print("data module initiated")
 print(f"DEBUG: Train size={len(split_dict['train'])}, Val size={len(split_dict['val'])}, Test size={len(split_dict['test'])}")
 print(f"DEBUG: First 5 val IDs: {list(split_dict['val'])[:5]}")
 
-# Compute pos_weight for binary tasks (class imbalance correction)
+# pos_weight for binary tasks
 binary_pos_weight = None
 side_effects_pos_weight = None
 _SE_OPTIONS = ['anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', 'Liver_toxicity']
@@ -244,7 +244,7 @@ if weighted_bce:
         except Exception as e:
             print(f"Warning: could not compute side_effects pos_weight: {e}")
 else:
-    print("WeightedBCE disabled — using standard BCE (pos_weight=None)")
+    print("WeightedBCE disabled, using standard BCE (pos_weight=None)")
 
 
 # Determine model_option from task option
@@ -283,6 +283,13 @@ if modules in ['all', 'practical', 'parsimonious']:
             use_sigmoid=use_sigmoid,
             temporal_aggregation=time_processing,
             missing_mask=missing_mask,
+            module_index_cfg=module_index_cfg,
+            use_module_tokenizer=use_module_tokenizer,
+            use_continuous_time=use_continuous_time,
+            n_static_features=n_static_features,
+            post_mlp_dropout=post_mlp_dropout,
+            batch_first=batch_first,
+            time_as_raw_feature=time_as_raw_feature,
             lr=learning_rate,
             binary_pos_weight=binary_pos_weight,
             side_effects_pos_weight=side_effects_pos_weight,
@@ -298,7 +305,7 @@ if modules in ['all', 'practical', 'parsimonious']:
                 print("Deleting corrupted checkpoint and falling back to best epoch checkpoint...")
                 os.remove(last_ckpt_path)
 
-                # Find the best checkpoint (epoch checkpoints)
+                # best epoch checkpoint
                 ckpts = [x for x in os.listdir(fold_dir)
                          if x != 'last.ckpt' and not os.path.isdir(f'{fold_dir}/{x}') and '.ckpt' in x]
                 if ckpts:
@@ -307,7 +314,7 @@ if modules in ['all', 'practical', 'parsimonious']:
                     resuming_finetuning_checkpoint = True
                 else:
                     print("No valid epoch checkpoint found. Starting from pretrained model.")
-                    ## first remove this folder to avoid accidentally loading a corrupted checkpoint in the next step
+                    # remove the folder so a corrupted checkpoint is not picked up later
                     os.rmdir(fold_dir)
                     os.mkdir(fold_dir)
                     if pretrained_model_path == '':
@@ -346,7 +353,7 @@ if modules in ['all', 'practical', 'parsimonious']:
                 raise NotImplementedError("DuETT not implemented for all modules")
             if not resuming_finetuning_checkpoint and med_as_feature:
                 print("custom load: med_as_feature")
-                # Note: Model's load_state_dict() is overridden to use strict=False
+                # load_state_dict is overridden with strict=False
                 model = SPARC.custom_load_from_checkpoint(
                     optimal_model_path, load_w_meds=False,
                     modular_featuredim_dict=modular_featuredim_dict, option=model_option,
@@ -357,6 +364,13 @@ if modules in ['all', 'practical', 'parsimonious']:
                     use_sigmoid=use_sigmoid,
                     temporal_aggregation=time_processing,
                     missing_mask=missing_mask,
+                    module_index_cfg=module_index_cfg,
+                    use_module_tokenizer=use_module_tokenizer,
+                    use_continuous_time=use_continuous_time,
+                    n_static_features=n_static_features,
+                    post_mlp_dropout=post_mlp_dropout,
+                    batch_first=batch_first,
+                    time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
                                     binary_pos_weight=binary_pos_weight,
             side_effects_pos_weight=side_effects_pos_weight,
@@ -365,7 +379,7 @@ if modules in ['all', 'practical', 'parsimonious']:
                   and model_option in ['side_effects', 'side_effects_risk', 'side_effects_next_risk']
                   and add_num_infusion):
                 print("custom load: side_effects_num_infusion")
-                # Note: Model's load_state_dict() is overridden to use strict=False
+                # load_state_dict is overridden with strict=False
                 model = SPARC.custom_load_from_checkpoint_sideeffect(
                     optimal_model_path,
                     modular_featuredim_dict=modular_featuredim_dict, option=model_option,
@@ -377,14 +391,20 @@ if modules in ['all', 'practical', 'parsimonious']:
                     include_gcsf=include_gcsf, use_gcsf=include_gcsf, use_sigmoid=use_sigmoid,
                     temporal_aggregation=time_processing,
                     missing_mask=missing_mask,
+                    module_index_cfg=module_index_cfg,
+                    use_module_tokenizer=use_module_tokenizer,
+                    use_continuous_time=use_continuous_time,
+                    n_static_features=n_static_features,
+                    post_mlp_dropout=post_mlp_dropout,
+                    batch_first=batch_first,
+                    time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
                                     binary_pos_weight=binary_pos_weight,
             side_effects_pos_weight=side_effects_pos_weight,
                 )
             else:
                 print("standard load:", model_option, "add_num_infusion", add_num_infusion, "med_as_feature", med_as_feature)
-                # Note: Model's load_state_dict() is overridden to use strict=False
-                # to allow missing Gemma keys (Gemma is excluded from checkpoints)
+                # load_state_dict uses strict=False: Gemma weights are not saved in checkpoints
                 model = SPARC.load_from_checkpoint(
                     optimal_model_path,
                     modular_featuredim_dict=modular_featuredim_dict, option=model_option,
@@ -396,6 +416,13 @@ if modules in ['all', 'practical', 'parsimonious']:
                     include_gcsf=include_gcsf, use_gcsf=include_gcsf, use_sigmoid=use_sigmoid,
                     temporal_aggregation=time_processing,
                     missing_mask=missing_mask,
+                    module_index_cfg=module_index_cfg,
+                    use_module_tokenizer=use_module_tokenizer,
+                    use_continuous_time=use_continuous_time,
+                    n_static_features=n_static_features,
+                    post_mlp_dropout=post_mlp_dropout,
+                    batch_first=batch_first,
+                    time_as_raw_feature=time_as_raw_feature,
                     lr=learning_rate,
                                     binary_pos_weight=binary_pos_weight,
             side_effects_pos_weight=side_effects_pos_weight,
@@ -410,7 +437,7 @@ if os.path.exists(resume_ckpt_path) and is_checkpoint_corrupted(resume_ckpt_path
     print(f"WARNING: Resume checkpoint {resume_ckpt_path} is corrupted. Cannot resume from last checkpoint.")
     os.remove(resume_ckpt_path)
 
-    # Identify optimal epoch checkpoint to resume from (if it exists)
+    # best epoch checkpoint to resume from, if any
     fold_dir = f'{output_model_path}/fold{valfold}'
     if os.path.exists(fold_dir):
         ckpts = [x for x in os.listdir(fold_dir)
@@ -433,7 +460,7 @@ os.makedirs(output_model_path, exist_ok=True)
 logger_csv = pl.loggers.CSVLogger(f"{output_model_path}/logs_csv", name="lightning_logs_csv")
 logger_tb  = pl.loggers.TensorBoardLogger(f"{output_model_path}/logs_tb",  name="lightning_logs_tb")
 
-# for side effect ish tasks, use max val_auroc_nextinf_weighted as checkpoint metric; for others, use val_loss
+# side-effect tasks: checkpoint on max val_auroc_nextinf_weighted; others on val_loss
 if bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$', option)):
     monitor_metric = 'val_auroc_nextinf_weighted'
     mode_metric = 'max'
@@ -449,7 +476,7 @@ checkpoint = pl.callbacks.ModelCheckpoint(
     monitor=monitor_metric,
     dirpath=output_model_path,
     filename='epoch={epoch}-step={step}',
-    enable_version_counter=False,  # Prevent -v1, -v2 suffixes
+    enable_version_counter=False,  # no -v1, -v2 suffixes
 )
 
 callbacks_list = [checkpoint]
@@ -461,7 +488,7 @@ if early_stop_patience > 0:
         patience=early_stop_patience,
         mode=mode_metric,
         verbose=True,
-        min_delta=0.0001  # Minimum change to qualify as improvement
+        min_delta=0.0001
     )
     callbacks_list.append(early_stop_callback)
 else:
@@ -490,14 +517,14 @@ trainer = pl.Trainer(
 )
 pl.seed_everything(rseed)
 
-# Run a test pass only when we are not training (avoids a meaningless pre-training test).
+# test pass only when not training
 if mode != 'train':
     trainer.test(model, data_module.test_dataloader())
 
 # Train
 if mode == 'train':
     if resume:
-        # Final safety check before resuming
+        # re-check before resuming
         if is_checkpoint_corrupted(resume_ckpt_path):
             print(f"ERROR: Checkpoint {resume_ckpt_path} is corrupted. Cannot resume training.")
             raise RuntimeError(f"Corrupted checkpoint: {resume_ckpt_path}")
@@ -506,13 +533,13 @@ if mode == 'train':
     else:
         trainer.fit(model, data_module)
 
-    # After training, keep only the overall best checkpoint across all runs
+    # keep only the best checkpoint across all runs
     print("Cleaning up checkpoints - keeping only the overall best...")
     epoch_ckpts = [f for f in os.listdir(output_model_path)
                    if f.startswith('epoch=') and f.endswith('.ckpt')]
 
     if len(epoch_ckpts) > 1:
-        # Load validation loss from each checkpoint and find the best
+        # find the checkpoint with the lowest validation loss
         best_val_loss = float('inf')
         best_ckpt = None
 
@@ -533,7 +560,7 @@ if mode == 'train':
             except Exception as e:
                 print(f"  Warning: Could not load {ckpt_file}: {e}")
 
-        # Delete all checkpoints except the best one
+        # delete the rest
         if best_ckpt:
             print(f"Keeping best checkpoint: {best_ckpt} (val_loss={best_val_loss:.6f})")
             for ckpt_file in epoch_ckpts:
@@ -571,6 +598,8 @@ model = SPARC.load_from_checkpoint(
     use_continuous_time=use_continuous_time,
     n_static_features=n_static_features,
     post_mlp_dropout=post_mlp_dropout,
+    batch_first=batch_first,
+    time_as_raw_feature=time_as_raw_feature,
     lr=learning_rate,
     binary_pos_weight=binary_pos_weight,
     side_effects_pos_weight=side_effects_pos_weight,

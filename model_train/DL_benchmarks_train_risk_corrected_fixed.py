@@ -13,7 +13,7 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
         sys.path.insert(0, _p)
 import sparc_paths
 from data_loaders_inf_risk_fixed import *
-from dataset_loading import load_dataset   # <-- all data loading in one place
+from dataset_loading import load_dataset
 data_source_path=sparc_paths.DATA_ROOT + '/'
 
 valfold = 0
@@ -62,7 +62,7 @@ if valfold not in range(10):
 
 med_of_choice = med_of_choice.split(',')
 med_of_choice = [med.strip() for med in med_of_choice]
-# JUST ADDED 100825: tackle the case where it's e.g. 'DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN+PACLITAXEL,CARBOPLATIN+ETOPOSIDE,CABAZITAXEL'
+# '+' joins drugs of one regimen, e.g. 'CARBOPLATIN+PACLITAXEL'
 result_meds = []
 for med_str in med_of_choice:
     if '+' in med_str:
@@ -114,7 +114,7 @@ if model_option in ['lasttp_MLP', 'raindrop', 'rnn', 'rnn_deephit', 'duett']:
 
 
 
-## HYPERPARAMETERS ## 
+# hyperparameters
 batch_size = 512
 competing_risk_death_check = False
     
@@ -211,7 +211,6 @@ else:
     if mode == 'test':
         # find best checkpoint
         print("loading best checkpoint for testing")
-        ## check the files in output_model_path ending with .ckpt and not last.ckpt in output_model_path
         files = os.listdir(output_model_path)
         ckpt_files = [f for f in files if f.endswith('.ckpt') and f != 'last.ckpt']
         best_ckpt_file = ckpt_files[0]

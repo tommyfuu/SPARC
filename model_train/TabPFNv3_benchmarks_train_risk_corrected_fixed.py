@@ -11,7 +11,7 @@ import pickle
 import os
 import sys
 import json
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -23,9 +23,8 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models'),
         sys.path.insert(0, _p)
 import sparc_paths
 from data_loaders_inf_risk_fixed import *
-from dataset_loading import load_dataset   # <-- all data loading in one place
+from dataset_loading import load_dataset
 
-# TabPFN imports
 try:
     from tabpfn import TabPFNClassifier
 except ImportError:
@@ -69,20 +68,17 @@ mode = args.mode.lower()
 quick_test = args.quick_test.lower() == 'true'
 caia_portion = args.caia_portion.lower()
 
-# Hard-coded to 1 for fair comparison with other models (no ensemble voting)
+# 1 for a fair comparison with the other models (no ensemble voting)
 n_ensemble = 1
 
-# Validate valfold
 if valfold not in range(10):
     raise ValueError(f'valfold must be between 0 and 9 (pass 1-10 to -f argument, got {args.valfold})')
 
-# Validate model option
 if model_option not in ['temporal_tabpfn']:
     raise ValueError("model_option must be 'temporal_tabpfn'")
 
 
-# Shared with eval_1/eval_2/eval_3 and the design-choice scripts; one copy
-# in results_vis/eval_utils.py so the metric cannot drift between them.
+# shared with eval_1/2/3 via results_vis/eval_utils.py
 from eval_utils import calculate_weighted_c_index_by_infusion
 
 
@@ -108,16 +104,14 @@ max_time_len = 20
 if 'risk' in option:
     raise ValueError("Risk prediction framings are not supported with TabPFN. Use binary classification tasks only.")
 
-# Use GPU if available
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Initializing TabPFN v3 with n_ensemble={n_ensemble}, device={device}")
 model = TabPFNClassifier(
-    n_estimators=n_ensemble,  # Number of ensemble members
-    device=device,  # Use GPU if available
+    n_estimators=n_ensemble,
+    device=device,
     random_state=rseed
 )
 
-# Load dataset (all loading/normalization/splitting is in dataset_loading.py)
 print("Loading dataset...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
@@ -136,10 +130,8 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 print("modular_featuredim_dict", modular_featuredim_dict)
 print("current validation fold:", valfold)
 
-# Set anc flag for CAIA datasets
 anc = 'CAIA' in dataset
 
-# Random seed
 pl.seed_everything(rseed)
 
 if dataset == 'MSK':
@@ -153,7 +145,7 @@ if bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(
 else:
     include_infusion_dates = False
 
-# Override add_num_infusion for binary tasks (infusion numbers only relevant for side-effect tasks)
+# infusion numbers only apply to the side-effect tasks
 if option in ['binary', 'binary_icu_pre', 'binary_risk'] and add_num_infusion:
     print(f"WARNING: add_num_infusion=True is not applicable for task '{option}'. Setting to False.")
     add_num_infusion = False
@@ -164,30 +156,23 @@ data_module = FlexibleFeatureDataModule(data_dict_lab_dict, split_dict, dataset 
     advanced_model = advanced_model, include_infusion_dates = include_infusion_dates, anc=anc)
 print("data module initiated")
 
-# Set random seed
 np.random.seed(rseed)
 
-# Prepare training data
 print("Preparing training data...")
 train_dataset = data_module.train_dataset
 train_X_l = []
 train_y_l = []
 for i in range(len(data_module.train_dataset.dataset_DMP_IDs)):
-    # temporal_tabpfn uses all time points
     xs_tp, time_tp = train_dataset.__getitem__(i)[0][0].detach().clone(), train_dataset.__getitem__(i)[0][1].detach().clone()
     time_nan_mask = torch.isnan(time_tp).int().unsqueeze(-1).detach().clone()
 
-    # Find mask
     mask = torch.isnan(xs_tp).detach().clone()
-    # Fill missing values with 0
     xs_tp[mask] = 0
 
-    # Concatenate and flatten (temporal approach)
     time_tp_combine = time_tp.unsqueeze(-1)
     time_tp_combine[time_nan_mask.bool()] = 0.0
     xs_tp = torch.cat((xs_tp, mask, time_tp_combine, time_nan_mask), dim=1).view(-1)
 
-    # Add num_infusions if needed
     if include_infusion_dates:
         xs_tp_infusions = train_dataset.__getitem__(i)[0][2]
         xs_tp_infusions = torch.tensor(xs_tp_infusions, dtype=torch.float32).unsqueeze(-1)
@@ -202,8 +187,7 @@ train_y = np.array(train_y_l)
 
 print(f"Training data shape: {train_X.shape}, labels shape: {train_y.shape}")
 
-# TabPFN has dataset size limitations (typically ~10,000 samples and ~1,000 features)
-# Check if we need to subsample
+# TabPFN size limits
 MAX_SAMPLES = 10000
 MAX_FEATURES = 1000
 
@@ -217,37 +201,29 @@ if train_X.shape[0] > MAX_SAMPLES:
 if train_X.shape[1] > MAX_FEATURES:
     print(f"WARNING: Feature dimension is {train_X.shape[1]}, which exceeds TabPFN's limit of {MAX_FEATURES}.")
     print(f"You may need to use feature selection or dimensionality reduction.")
-    # For now, we'll just truncate to the first MAX_FEATURES
     print(f"Truncating to first {MAX_FEATURES} features...")
     train_X = train_X[:, :MAX_FEATURES]
 
-# Train TabPFN
 print("Training TabPFN...")
 model.fit(train_X, train_y)
 print("Training complete!")
 
-# Prepare test data
 print("Preparing test data...")
 test_dataset = data_module.test_dataset
 test_X_l = []
 test_y_l = []
 test_num_infusions = []
 for i in range(len(data_module.test_dataset.dataset_DMP_IDs)):
-    # temporal_tabpfn uses all time points
     xs_tp, time_tp = test_dataset.__getitem__(i)[0][0].detach().clone(), test_dataset.__getitem__(i)[0][1].detach().clone()
     time_nan_mask = torch.isnan(time_tp).int().unsqueeze(-1).detach().clone()
 
-    # Find mask
     mask = torch.isnan(xs_tp).detach().clone()
-    # Fill missing values with 0
     xs_tp[mask] = 0
 
-    # Concatenate and flatten (temporal approach)
     time_tp_combine = time_tp.unsqueeze(-1)
     time_tp_combine[time_nan_mask.bool()] = 0.0
     xs_tp = torch.cat((xs_tp, mask, time_tp.unsqueeze(-1), time_nan_mask), dim=1).view(-1)
 
-    # Add num_infusions if needed
     if include_infusion_dates:
         xs_tp_infusions = test_dataset.__getitem__(i)[0][2]
         xs_tp_infusions = torch.tensor(xs_tp_infusions, dtype=torch.float32).unsqueeze(-1)
@@ -260,17 +236,14 @@ for i in range(len(data_module.test_dataset.dataset_DMP_IDs)):
 test_X = torch.stack(test_X_l)
 test_X = test_X.numpy()
 
-# Apply same feature truncation as training if needed
 if test_X.shape[1] > MAX_FEATURES:
     test_X = test_X[:, :MAX_FEATURES]
 
 print(f"Test data shape: {test_X.shape}")
 
-# Evaluate TabPFN
 print("Evaluating TabPFN...")
-# Use predict_proba for classification (returns probabilities)
 y_pred_proba = model.predict_proba(test_X)
-y_pred = y_pred_proba[:, 1]  # Probability of positive class
+y_pred = y_pred_proba[:, 1]
 
 from torchsurv.metrics.cindex import ConcordanceIndex
 from torchmetrics import AUROC, F1Score, AveragePrecision, Accuracy, Precision, Recall
@@ -284,14 +257,12 @@ recall = Recall(task='binary')
 f1 = F1Score(task='binary')
 auprc = AveragePrecision(task='binary')
 
-# Evaluate based on task type
 if option in ['binary', 'binary_icu_pre']:
     auroc_score = auroc(torch.tensor(y_pred), torch.tensor(test_y_l))
     f1_score = f1(torch.tensor(y_pred), torch.tensor(test_y_l))
     auprc_score = auprc(torch.tensor(y_pred).float(), torch.tensor(test_y_l))
     print(f'AUROC: {auroc_score}, F1: {f1_score}, AUPRC: {auprc_score}')
 elif option in ['anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', 'Liver_toxicity']:
-    # Binary prediction task for next infusion side effect
     y_event = torch.tensor(test_y_l)
     test_num_infusions = torch.tensor(test_num_infusions)
     y_pred = torch.tensor(y_pred).float()
@@ -301,7 +272,6 @@ elif option in ['anemia', 'neutropenia', 'febrile_neutropenia', 'AKI', 'Liver_to
     else:
         print("Could not compute metrics (insufficient valid infusions)")
 
-# Save the model
 if not os.path.exists(output_model_path):
     os.makedirs(output_model_path, exist_ok=True)
 

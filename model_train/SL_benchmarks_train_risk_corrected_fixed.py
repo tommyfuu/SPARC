@@ -1,27 +1,8 @@
-"""
-Shallow-learning (XGBoost) benchmarks for SPARC.
+"""XGBoost shallow-learning benchmarks: lasttp_xgboost (last timepoint) or temporal_xgboost (20 timepoints flattened).
 
-Data loading, normalization and splitting all live in data/dataset_loading.py.
-This script flattens the datamodule into a feature matrix, grid-searches an
-XGBClassifier, evaluates it and writes the fitted model.
-
-Two representations: lasttp_xgboost (last timepoint only) and temporal_xgboost
-(all 20 timepoints flattened).
-
-Paths resolve as --volume_path > $SPARC_DATA_PATH > default, and
---output_model_path > $SPARC_MODEL_PATH > default. Output goes to
-
-    <root>/<model_option>/<dataset>/<modules>_<option>/fold_<valfold>/
-
-holding the pickled estimator, best_params.json, metrics.json and
-run_config.json.
-
-Risk framings (*_risk, *_next_risk) are rejected: those yield (event, duration)
-targets that XGBClassifier cannot fit.
-
-    python3 SL_benchmarks_train_risk_corrected_fixed.py \
-        -ds MSK_CAIA -cp prior -mo temporal_xgboost -f 1 -o AKI -an True -d 180 \
-        -me "CISPLATIN,IFOSFAMIDE,PEMETREXED"
+Grid-searches an XGBClassifier on one fold and writes it to <root>/<model_option>/<dataset>/<modules>_<option>/fold_<n>/.
+Risk framings (*_risk) are rejected since XGBClassifier cannot fit (event, duration) targets.
+Usage: python3 SL_benchmarks_train_risk_corrected_fixed.py -ds MSK_CAIA -cp prior -mo temporal_xgboost -f 1 -o AKI -an True -d 180 -me "CISPLATIN,IFOSFAMIDE,PEMETREXED"
 """
 
 import argparse
@@ -62,15 +43,12 @@ DEFAULT_OUTPUT_ROOT = os.path.join(
 # Side-effect tasks (with or without a risk framing suffix).
 SE_TASK_PATTERN = r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$'
 
-# Which shallow models exist and how each reads the time series.  `lasttp` uses
-# only the most recent timepoint; `temporal` flattens the whole window.
+# lasttp uses only the most recent timepoint; temporal flattens the whole window.
 MODEL_REGISTRY = {
     'lasttp_xgboost':   {'representation': 'lasttp'},
     'temporal_xgboost': {'representation': 'temporal'},
 }
 
-# Previously five successive re-assignments of `param_grid`; this is the one
-# that actually took effect.
 PARAM_GRID = {'n_estimators': [2, 10, 100], 'max_depth': [2, 5]}
 
 
@@ -81,11 +59,7 @@ def build_estimator(rseed):
 
 def build_output_model_path(output_root, model_option, dataset, caia_portion,
                             modules, option, valfold):
-    """<root>/<model_option>/<dataset>/<modules>_<option>/fold_<n>/
-
-    The CAIA portion is folded into the dataset segment: `prior` and `post` are
-    different training sets and must not overwrite one another.
-    """
+    """<root>/<model_option>/<dataset>_<caia_portion>/<modules>_<option>/fold_<n>/ (prior and post kept apart)."""
     dataset_dir = f'{dataset}_{caia_portion}' if 'CAIA' in dataset else dataset
     return os.path.join(output_root, model_option, dataset_dir,
                         f'{modules}_{option}', f'fold_{valfold}')
@@ -94,29 +68,16 @@ def build_output_model_path(output_root, model_option, dataset, caia_portion,
 loss_fn = nn.BCELoss(reduction='none')
 
 
-# Shared with eval_1/eval_2/eval_3 and the design-choice scripts; one copy
-# in results_vis/eval_utils.py so the metric cannot drift between them.
+# shared with eval_1/2/3 via results_vis/eval_utils.py
 from eval_utils import calculate_weighted_c_index_by_infusion
 
 
 def build_feature_matrix(ds, representation, include_infusion_dates, add_num_infusion):
     """Flatten a FlexibleFeatureDataset into a dense (n_samples, n_features) matrix.
 
-    Layout, per sample:
-      lasttp   : [ last-timepoint values | missingness mask | last-timepoint time ]
-      temporal : [ values | mask | time | time-missingness ] per timepoint, flattened
-
-    This must match how eval_1_across_models_comparison_060926_ensemble_FP_fixed.py
-    rebuilds features at inference (its lines 1531-1558), or a model trained here
-    is fed a different distribution at evaluation.  Two consequences:
-
-      * lasttp keeps NaN in the time column.  eval cats `time_tp` raw, and
-        XGBoost routes NaN natively as a learned "missing" branch -- zeroing it
-        would both break that signal and diverge from eval.
-      * temporal zeroes NaN times and carries a companion time-missingness
-        column, so nothing is lost there.
-
-    Lab-value NaNs are zeroed and flagged by `mask` in both layouts, matching eval.
+    lasttp:   [last-timepoint values | mask | time]; NaN time is kept (XGBoost handles it).
+    temporal: [values | mask | time | time-missingness] per timepoint, flattened.
+    Must match the feature build in eval_1_across_models_comparison_ensemble_final_FP_fixed.py.
     """
     X_rows = []
     y_rows = []
@@ -131,7 +92,7 @@ def build_feature_matrix(ds, representation, include_infusion_dates, add_num_inf
             time_tp = time_all[0].detach().clone()
             mask = torch.isnan(xs_tp)
             xs_tp = torch.nan_to_num(xs_tp, nan=0.0)
-            # NaN deliberately preserved here -- see the docstring.
+            # NaN time kept on purpose
             time_col = time_tp.reshape(1).float()
             feats = torch.cat((xs_tp, mask.float(), time_col), dim=0)
         else:
@@ -158,8 +119,7 @@ def build_feature_matrix(ds, representation, include_infusion_dates, add_num_inf
         raise ValueError('Dataset produced 0 samples — check the split, dataset and task options.')
 
     X = torch.stack(X_rows).numpy().astype(np.float32)
-    # NaN is expected in the lasttp time column and is handled by XGBoost; inf is
-    # never legitimate and would mean an upstream normalization bug.
+    # NaN is expected in the lasttp time column; inf would mean a normalization bug
     if np.isinf(X).any():
         raise ValueError('Feature matrix contains infinite values.')
     return X, y_rows, num_infusions
@@ -235,10 +195,6 @@ data_fraction_option = 'default'
 competing_risk_death_check = False
 max_time_len = 20
 
-# python3 SL_benchmarks_train_risk_corrected_fixed.py \
-#       -ds MSK_CAIA -cp prior -m parsimonious -mo temporal_xgboost \
-#       -o AKI -f 1 -d 180 -an True -qt False -me "$AKI_MEDS" \
-#       -op /data1/morrisq/fuc/sl_smoke_test
       
 if valfold not in range(10):
     raise ValueError(f'valfold must be between 0 and 9 (pass 1-10 to -f argument, got {args.valfold})')
@@ -258,8 +214,7 @@ is_se_task = bool(re.match(SE_TASK_PATTERN, option))
 is_risk_task = 'risk' in option
 
 if is_risk_task:
-    # ys come back as (event, duration) tuples for these tasks; XGBClassifier
-    # cannot fit a time-to-event target.
+    # targets are (event, duration) tuples, which XGBClassifier cannot fit
     raise ValueError(
         f"Task {option!r} uses a survival (time-to-event) framing, which "
         f"{model_option!r} cannot fit. Risk framings are not supported by the "
@@ -277,13 +232,13 @@ for med_str in med_of_choice:
 med_of_choice = result_meds
 print("med_of_choice is a list of medications:", med_of_choice)
 
-# Output directory: one root, subdivided by model family / model / dataset / task / fold
+# output dir
 output_model_path = build_output_model_path(
     output_root, model_option, dataset, caia_portion, modules, option, valfold)
 os.makedirs(output_model_path, exist_ok=True)
 print("output model path", output_model_path)
 
-# Load dataset (all loading/normalization/splitting is in dataset_loading.py)
+# load dataset
 print("Loading dataset...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset,
@@ -294,7 +249,7 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
     mode=mode,
     rseed=rseed,
     competing_risk_death_check=competing_risk_death_check,
-    include_gcsf=False,  # SL benchmarks don't use GCSF
+    include_gcsf=False,
     data_fraction_option=data_fraction_option,
     quick_test=quick_test,
     caia_portion=caia_portion,
@@ -305,12 +260,10 @@ print("current validation fold:", valfold)
 # Infusion numbers are only meaningful for the side-effect tasks.
 include_infusion_dates = is_se_task
 
-# Override add_num_infusion for binary tasks (infusion numbers only relevant for side-effect tasks)
 if option in ['binary', 'binary_icu_pre', 'binary_risk'] and add_num_infusion:
     print(f"WARNING: add_num_infusion=True is not applicable for task '{option}'. Setting to False.")
     add_num_infusion = False
 
-# Set anc flag for CAIA datasets
 anc = 'CAIA' in dataset
 
 pl.seed_everything(rseed)
