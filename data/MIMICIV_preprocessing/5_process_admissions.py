@@ -18,7 +18,7 @@ def main():
     output_file = f'{OUTPUT_PATH}/MIMICIV_subjectid_to_admission_discharge_dict_112325.pkl'
 
     if os.path.exists(output_file):
-        print(f"\n⚠️  Output file already exists:")
+        print(f"\nWARNING: Output file already exists:")
         print(f"   - {os.path.basename(output_file)}")
         response = input("\nSkip this step? (y/n): ")
         if response.lower() == 'y':

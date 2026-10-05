@@ -14,9 +14,9 @@ from config import (
 )
 
 def main():
-    print("="*80)
+    print()
     print("Step 1: Extracting Cancer Patients")
-    print("="*80)
+    print()
 
     # Check if outputs already exist
     output_files = [
@@ -25,7 +25,7 @@ def main():
     ]
 
     if all(os.path.exists(f) for f in output_files):
-        print("\n⚠️  Output files already exist:")
+        print("\nWARNING: Output files already exist:")
         for f in output_files:
             print(f"   - {os.path.basename(f)}")
         response = input("\nSkip this step? (y/n): ")
@@ -104,9 +104,9 @@ def main():
         pickle.dump(subject_to_cancer_type, f)
     print(f"   Saved: MIMICIV_subjectid_to_mapped_cancer_type_dict_080625.pkl")
 
-    print("\n" + "="*80)
+    print()
     print("Step 1 Complete!")
-    print("="*80)
+    print()
 
 if __name__ == '__main__':
     main()

@@ -1,9 +1,4 @@
-"""
-Configuration file for MIMIC-IV preprocessing.
-Contains paths, constants, and shared utilities.
-
-This extracts ALL labs and vitals (like stanfordEHRSHOT), not just basic subset.
-"""
+"""Paths, lab/vital/drug mappings and ICD helpers for MIMIC-IV preprocessing (all labs and vitals, not a basic subset)."""
 
 # Put the repo root, data/ and models/ on sys.path, from any working directory.
 import os, sys
@@ -21,12 +16,9 @@ import sys
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ============================================================================
-# PATHS
-# ============================================================================
+# Paths
 
-# Override either with an environment variable so the same checkout works on
-# hosts that mount the data elsewhere (e.g. /data1 vs /data):
+# override with environment variables if the data is mounted elsewhere:
 #     export SPARC_MIMIC_RAW_PATH=/path/to/mimic_iv_3.1_mult/hosp
 #     export SPARC_MIMIC_OUTPUT_PATH=/path/to/SPARC_data/MIMICIV_hosp
 MIMIC_RAW_PATH = os.environ.get(
@@ -38,17 +30,13 @@ OUTPUT_PATH = os.environ.get(
     sparc_paths.DATA_ROOT + '/MIMICIV_hosp',
 )
 
-# Create output directory if it doesn't exist. Don't fail at import time if the
-# path is not writable here — scripts that only read (e.g. the race/ethnicity
-# summaries) should still be importable.
+# create the output dir, but stay importable if it isn't writable
 try:
     os.makedirs(OUTPUT_PATH, exist_ok=True)
 except OSError as _e:
     print(f"Warning: could not create OUTPUT_PATH {OUTPUT_PATH!r}: {_e}")
 
-# ============================================================================
-# LAB TEST MAPPINGS (MIMIC-IV to SPARC)
-# ============================================================================
+# Lab test mappings (MIMIC-IV to SPARC)
 
 # ALL lab tests expected by SPARC (46 total - same as ALL_INCLUDED_TESTS)
 ALL_INCLUDED_TESTS = [
@@ -111,7 +99,7 @@ MIMIC_TO_SPARC_LAB_MAPPING = {
     'Bilirubin, Total': ['50885'],  # Bilirubin, Total
     'Conjugated Bili (mg)': ['50883'],  # Conjugated/Direct Bilirubin
 
-    # Tumor markers (CORRECTED - verified from d_labitems)
+    # Tumor markers (itemids checked against d_labitems)
     'CEA': ['50900'],  # Carcinoembyronic Antigen (CEA)
     'PSA': [],  # PSA not available in MIMIC-IV hosp module
     'Alphafetoprotein': ['50864'],  # Alpha-Fetoprotein (AFP)
@@ -124,17 +112,15 @@ MIMIC_TO_SPARC_LAB_MAPPING = {
     'TSH': ['50993'],  # Thyroid Stimulating Hormone
 }
 
-# ============================================================================
-# VITAL SIGNS MAPPINGS (MIMIC-IV to SPARC)
-# ============================================================================
+# Vital sign mappings (MIMIC-IV to SPARC)
 
-# WARNING: MIMIC-IV hosp module has VERY LIMITED vitals data!
+# MIMIC-IV hosp has very limited vitals; only the omr table has:
 # Only available in omr table:
 #   - Blood Pressure (various positions)
 #   - BMI
 #   - Height
 #   - Weight
-# NOT AVAILABLE in hosp module (require ICU chartevents):
+# Not in hosp (would need ICU chartevents):
 #   - Heart Rate / Pulse
 #   - O2 Saturation
 #   - Respiratory Rate
@@ -171,9 +157,7 @@ AVAILABLE_VITALS_IN_OMR = [
     'eGFR'
 ]
 
-# ============================================================================
-# HIGH-RISK MEDICATIONS FOR SIDE EFFECT PREDICTION
-# ============================================================================
+# High-risk medications
 
 # Myelosuppression drugs (neutropenia, anemia, thrombocytopenia risk)
 MYELO_DRUGS = [
@@ -198,15 +182,7 @@ AKI_DRUGS = [
 INCLUDED_DRUGS = list(set(MYELO_DRUGS + LT_DRUGS + AKI_DRUGS))
 
 def normalize_drug_name(drug_name):
-    """
-    Normalize drug name to UPPERCASE standard name if it matches included drugs.
-    Otherwise, return the original name.
-
-    Examples:
-        "Cisplatin 50mg" -> "CISPLATIN"
-        "pembrolizumab" -> "PEMBROLIZUMAB"
-        "Acetaminophen" -> "Acetaminophen" (unchanged)
-    """
+    """Map a drug name to its UPPERCASE standard name if it matches an included drug, else return it unchanged."""
     if not isinstance(drug_name, str):
         return drug_name
 
@@ -219,9 +195,7 @@ def normalize_drug_name(drug_name):
 
     return drug_name  # Return original if not in included list
 
-# ============================================================================
-# ICD CODES FOR CANCER DIAGNOSIS
-# ============================================================================
+# ICD codes for cancer diagnosis
 
 # ICD-10 cancer codes (C00-D49)
 ICD10_CANCER_PREFIXES = [
@@ -234,9 +208,7 @@ ICD9_CANCER_RANGES = [
     ('140', '239')  # Neoplasms
 ]
 
-# ============================================================================
-# CANCER TYPE MAPPING (ICD to readable names)
-# ============================================================================
+# Cancer type mapping (ICD to readable names)
 
 ICD10_TO_CANCER_TYPE = {
     'C00': 'Head and Neck Cancer', 'C01': 'Head and Neck Cancer',
@@ -287,9 +259,7 @@ ICD10_TO_CANCER_TYPE = {
     'D3': 'others', 'D4': 'Myelodysplastic Syndromes',
 }
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
+# Utility functions
 
 def is_cancer_code_icd10(code):
     """Check if ICD-10 code is cancer-related."""

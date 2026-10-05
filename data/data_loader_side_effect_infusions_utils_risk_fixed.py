@@ -598,15 +598,10 @@ def rolling_c2_within(baseline_dict, window_days=7, baseline_strategy='last', fl
 
 def rolling_c2(baseline_dict, post_dict, window_days=7, baseline_strategy='last', floor=0.5):
     """
-    baseline_dict: {day: scr} for pre-med (sorted ascending by day)
-    post_dict: {day: scr} for post-med (sorted ascending by day)
-    window_days: size of lookback window for baseline (KDIGO: 7)
-    baseline_strategy:
-    'last' -> use the most recent prior SCr within the window
-    'min' -> use the minimum SCr within the window (more sensitive)
-    'median2' -> median of SCr on the last up to 2 distinct prior days (robust)
-    floor: minimum baseline allowed (mg/dL) to avoid tiny baselines
-    Returns: (status_bool, earliest_c2_date or None)
+    Detect KDIGO c2 (1.5x baseline) in post_dict, with the baseline taken from prior
+    values within window_days. baseline_strategy: 'last', 'min' or 'median2'
+    (median of the last up to 2 distinct days); baseline is floored at `floor` mg/dL.
+    Returns (status_bool, earliest_c2_date or None).
     """
     # ensure sorted dicts
     baseline_items = sorted(baseline_dict.items())
@@ -713,7 +708,7 @@ def AKI_adjudication(DMP_ID, removal_dict, pre_med_start_dates, post_med_start_d
             whole_med_period_measurements_with_last = {last_baseline_date: baseline_date_to_creatinine_levels[last_baseline_date]}
             whole_med_period_measurements_with_last.update(whole_med_period_creatinine_measurements)
 
-            # TODO: check - added 121825 - remove NANs
+            # remove NaNs
             whole_med_period_creatinine_measurements = {date: value for date, value in whole_med_period_creatinine_measurements.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))}
             whole_med_period_measurements_with_last = {date: value for date, value in whole_med_period_measurements_with_last.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))}
             
@@ -812,7 +807,7 @@ def AKI_adjudication(DMP_ID, removal_dict, pre_med_start_dates, post_med_start_d
                     current_measurements_with_last = {last_baseline_date: baseline_date_to_creatinine_levels[last_baseline_date]}
                     current_measurements_with_last.update(current_creatinine_measurements)
                     
-                    # TODO: check - added 121825 - remove NANs
+                    # remove NaNs
                     current_creatinine_measurements = {date: value for date, value in current_creatinine_measurements.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))}
                     current_measurements_with_last = {date: value for date, value in current_measurements_with_last.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))}
 
@@ -837,7 +832,7 @@ def AKI_adjudication(DMP_ID, removal_dict, pre_med_start_dates, post_med_start_d
                         whole_med_period_measurements_with_last = {last_baseline_date: baseline_date_to_creatinine_levels[last_baseline_date]}
                         whole_med_period_measurements_with_last.update(whole_med_period_creatinine_measurements)
                         
-                        # TODO: check - added 121825 - remove NANs
+                        # remove NaNs
                         whole_med_period_creatinine_measurements = {date: value for date, value in whole_med_period_creatinine_measurements.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))}
                         whole_med_period_measurements_with_last = {date: value for date, value in whole_med_period_measurements_with_last.items() if value not in ['NA', 'NAN', None] and not (isinstance(value, float) and math.isnan(value))} 
 

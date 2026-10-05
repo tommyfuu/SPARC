@@ -1,5 +1,5 @@
 import torch
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put the repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -26,14 +26,8 @@ from itertools import combinations
 # from data_loader_side_effect_infusions_utils_risk import *
 from data_loader_side_effect_infusions_utils_risk_fixed import *
 
-def replace_na(x):
-    # Check if the item is a string, and if it's in ['NA', 'nan', 'NAN'], return np.nan
-    if isinstance(x, str) and x in ['NA', 'nan', 'NAN']:
-        return np.nan
-    return x
 
-
-####### THIS PART OF THE CODE DEALS WITH GETTING Y ######
+# labels (y)
 def y_tuple_calc(cutoffdate, deathdate, lastcontactdate):
     if not np.isnan(deathdate):
         # the tuple would mean that the patient dies in the next x days
@@ -303,49 +297,33 @@ def _finalize_output(ts_data, dates, static_out, cutoffdate, max_time_len, task,
         return ts_tensor, dates_tensor
         
 def select_random_window(dates, k=15):
-    """
-    Select a random window of dates with a length between 2 and min(len(dates), k).
-    
-    Parameters:
-    dates (list): A sorted list of dates.
-    k (int): The maximum allowable length of the window.
-    
-    Returns:
-    list: A randomly selected window of dates.
-    """
-    # Ensure we have enough dates for the minimum window size
+    """Random contiguous window of a sorted date list, length between 2 and min(len(dates), k) + 1."""
     if len(dates) < 2:
         raise ValueError("The list must have at least 2 dates to select a window.")
     
-    # Step 1: Determine the maximum window length
     max_window_length = min(len(dates), k)
     
-    # Step 2: Randomly choose a window length between 2 and max_window_length+1 (possible to get 16 bc in that case use the first 15 to predict the 16th)
+    # up to max_window_length+1, so with k=15 the first 15 dates can predict the 16th
     window_length = np.random.randint(2, max_window_length + 2)
     
-    # Step 3: Randomly choose a starting index such that the window fits
     max_start_index = max(len(dates) - window_length, 0)
     start_index = np.random.randint(0, max_start_index + 1)
-    # Step 4: Extract and return the window
     return dates[start_index : start_index + window_length]
 
 def sample_from_geometric_likelihood(k, size=1):
     if k<1:
         raise ValueError("k must be greater than or equal to 1.")
-    # Define a reasonable upper limit for probabilities to approximate an infinite series
-    max_n = 1000  # This is the max value of n considered for practical computation
-    n_values = np.arange(max_n + 1) # starting from 1
+    # truncate the infinite series at n = 1000
+    max_n = 1000
+    n_values = np.arange(max_n + 1)
     
-    # Calculate unnormalized probabilities: 1/k^n
+    # unnormalized p(n) = 1/k^n
     unnormalized_probs = (1 / k) ** n_values
     
-    # Normalize the probabilities to sum to 1
     probabilities = unnormalized_probs / unnormalized_probs.sum()
     
-    # Sample from the discrete distribution
     samples = np.random.choice(n_values, size=size, p=probabilities)
 
-    # turn into python list
     samples = samples.tolist()
     
     return samples
@@ -354,48 +332,29 @@ def dates_to_relative_dates(dates, cutoffdate):
     return [date-cutoffdate for date in dates]
 
 def check_if_fits_criteria(criteria_medication_name, current_date_medications, exclusion_meds=None, dataset=None, regimen_analysis=False):
-    """
-    Check if current medications meet criteria.
-
-    For CAIA regimen analyses: uses case-insensitive substring matching with exclusions
-    For all other cases: uses exact matching (original behavior)
-
-    Args:
-        criteria_medication_name: List of list of meds (each sublist can have one single med
-                                  or multiple meds that must all be present)
-        current_date_medications: Set of medication names
-        exclusion_meds: List of medications that must NOT be present (optional, only for CAIA regimen analyses)
-        dataset: Dataset name (e.g., 'MSK_CAIA')
-        regimen_analysis: Whether this is for regimen analysis (default: False)
-
-    Returns:
-        tuple: (fits, fits_meds) - whether criteria is met and which meds matched
+    """Return (fits, fits_meds): which sublists of criteria_medication_name are all present.
+    CAIA regimen analyses use case-insensitive substring matching plus exclusion_meds;
+    everything else uses exact matching.
     """
     fits = False
     fits_meds = []
 
-    # Use substring matching for CAIA regimen analyses
     use_substring_matching = (dataset and 'CAIA' in dataset and regimen_analysis)
 
     if use_substring_matching:
-        # Convert current medications to uppercase for case-insensitive matching
         current_meds_upper = [med.upper() for med in current_date_medications]
 
-        # First check exclusions - if any exclusion med is present, reject immediately
+        # any exclusion med rejects the date
         if exclusion_meds:
             for exclusion_med in exclusion_meds:
                 exclusion_med_upper = exclusion_med.upper()
-                # Check if exclusion med is contained in any current medication (substring match)
                 if any(exclusion_med_upper in current_med_upper for current_med_upper in current_meds_upper):
                     return False, []
 
-        # Then check if any of the criteria combinations are met
         for sub_med_names in criteria_medication_name:
-            # Check if all medications in this sublist are present (as substrings)
             all_present = True
             for criteria_med in sub_med_names:
                 criteria_med_upper = criteria_med.upper()
-                # Check if this criteria med is contained in any current medication (substring match)
                 if not any(criteria_med_upper in current_med_upper for current_med_upper in current_meds_upper):
                     all_present = False
                     break
@@ -404,7 +363,7 @@ def check_if_fits_criteria(criteria_medication_name, current_date_medications, e
                 fits = True
                 fits_meds.append(sub_med_names)
     else:
-        # Original exact matching logic
+        # exact matching
         for sub_med_names in criteria_medication_name:
             med_included = False not in [m in current_date_medications for m in sub_med_names]
             if med_included:
@@ -462,7 +421,7 @@ def find_medication_start_end_dates(postbc_DMP_ID_to_DATES_to_nonoral_drug_cats_
                             for medication in medications:
                                 if medication[0] == med:
                                     medication_date_dosage_dict[start_date][med].append((medication[4], medication[5]))
-            ## note that start_date is used as start and end for each non-oral medication
+            # start_date is used as both start and end of each non-oral medication
             if med_included:
                 if first_start is None or start_date < first_start:
                     first_start = start_date
@@ -500,12 +459,11 @@ def find_medication_start_end_dates(postbc_DMP_ID_to_DATES_to_nonoral_drug_cats_
 
 def last_days_dates(dates, last_days, max_time_len, advanced_model='default'):
     if last_days: # in this case, grab the last max_time_len days
-        # reverse sort the dates #TODO: Tom checked 120727: to make transformer's input features have consistent meanings, the first value inputted has to be the last date prior to discharge, the second the second last, etc.
+        # reverse sort so position 0 is always the last date before the cutoff
         dates = sorted(dates, reverse=True)
         if advanced_model not in ['duett']:
-            dates = dates[:max_time_len] ##TODO Fix: Tom MISTAKE 120824
+            dates = dates[:max_time_len]
     else: # in this case, first draw max_time_len dates from the randomly ordered dates and sort them
-        # randomly order dates using numpy random shuffle
         np.random.shuffle(dates)
         if advanced_model not in ['duett']:
             dates = dates[:max_time_len]
@@ -609,7 +567,7 @@ def build_balanced_batches(
         pos_for_batches = distribute_positives(
             num_batches,
             pos,
-            force_add_positives=force_add_positives   # <<<< USE HERE
+            force_add_positives=force_add_positives
         )
         for b in range(num_batches):
             batch = []
@@ -653,7 +611,6 @@ def build_balanced_batches(
     return new_num_infusions, new_ys, new_DMP_IDs, other_fields, final_batches
 
 
-
 class FlexibleFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, data_dict_lab_dict, dataset_DMP_IDs, MSK_numfeature_dict, dataset = 'MSK', advanced_model = 'default', med_as_feature = False,
                     task = 'binary', med = 'CISPLATIN', binary_days = 180, med_l = [],
@@ -664,20 +621,9 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                     include_gcsf = False, gcsf_lim = None, max_windows_per_patient = 2, meds_returned = False,
                     test_shuffle=True,
                  **kwargs):
-        '''parameters:
-        data_dict_lab_dict: a dictionary of data dictionaries, with keys being the module names and values being the data dictionaries
-        dataset_DMP_IDs: a list of DMP_IDs for the dataset
-        max_time_len: the maximum number of dates to consider for the model
-        task: the task to consider, such as 'pretrain' or 'binary' or 'anemia_2wks' for binary classification; can also be a list; in that case considering the risk of multiple side effects in the same medication,
-        binary_days: the number of days to consider for binary tasks
-        last_days: whether to consider the last days available in the window or a random selection of dates
-        adjust_from_cutoff: whether to adjust the dates from the cutoff date
-            Note that if True, for pretrain, the dates will be adjusted from the cutoff date which is generated via a geometric distribution from the last date
-            Also note that in the transformer model, one can specify "time_calibration", this will adjust the dates from the first observed date instead of the cutoff date, 
-                which cancels the effect of adjust_from_cutoff
-        batch_size: the batch size
-        max_time_len: the length of the sequence to include as inputs to the model
-        component: the component to include, such as 'ts_only' or 'mutation_clinical_only' or 'all'
+        '''data_dict_lab_dict maps module name -> per-patient data; task is e.g. 'pretrain', 'binary' or a side effect.
+        adjust_from_cutoff makes dates relative to the cutoff (for pretrain, a geometric draw past the last date);
+        the model's time_calibration overrides this. component: 'ts_only', 'mutation_clinical_only' or 'all'.
         '''
         self.data_dict_lab_dict = data_dict_lab_dict
         print("keys in data_dict_lab_dict", data_dict_lab_dict.keys())
@@ -793,7 +739,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                 self.dataset_DMP_IDs = [DMP_ID for DMP_ID in self.dataset_DMP_IDs if DMP_ID in self.MED_DMP_ID_TO_START_END_DATE_DICT]
                 print("len(patient_w_med_first_date_dict) after processingmed ", len(self.dataset_DMP_IDs))
                 # self.DMP_ID_TO_INCLUDED_MED_DATES = self.DMP_ID_TO_INCLUDED_MED_DATES
-            ### NOTE: binary, binary_icu_pre, binary_risk, and progression-related ones do not need to be filtered by medication
+            # binary, binary_icu_pre, binary_risk and progression tasks are not filtered by medication
             print("len(self.dataset_DMP_IDs)", len(self.dataset_DMP_IDs))
             
             for DMP_ID in self.dataset_DMP_IDs:
@@ -823,7 +769,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                             dates = [date for date in all_dates if date >= hospital_tuple[0] and date <= hospital_tuple[1]]
                             cutoffdate = hospital_tuple[1]
                         elif task == 'binary_icu_pre':
-                            # NOTE: 052125: removed <= and replaced with < to ensure that only data prior to ICU stay is included
+                            # strict < so only data before the ICU stay is included
                             dates = [date for date in all_dates if date < hospital_tuple[0]]
                             cutoffdate = hospital_tuple[0]
                     else:
@@ -899,7 +845,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                                         if 'next_risk' in task:
                                             self.ys.append((y, 1))
                                         else:
-                                            self.ys.append((entire_y, current_num_durations_to_event_or_cutoff)) # note that y is obsoleted here
+                                            self.ys.append((entire_y, current_num_durations_to_event_or_cutoff)) # y unused here
                                             # # DEBUG: Print first 50 samples
                                             # if len(self.ys) <= 50:
                                             #     print(f"RISK: DMP_ID={DMP_ID}, idx={idx}, y={y}, entire_y={entire_y}, time_to_event={current_num_durations_to_event_or_cutoff}")
@@ -908,7 +854,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                                         # # DEBUG: Print first 50 samples
                                         # if len(self.ys) <= 50:
                                         #     print(f"NON-RISK: DMP_ID={DMP_ID}, idx={idx}, y={y}")
-                                    ## if gcsf, check to make gcsf ground truth true if gcsf is admistered on the same day or after input_end_date (cut off of treatment infusion) AND if y == 1 (FN==True), then the gcsf administration also has to be before the earliest_neut_or_fn_date
+                                    # gcsf label: given on/after input_end_date, and if y == 1 (FN), before earliest_neut_or_fn_date
                                     if self.include_gcsf:
                                         gcsf_given = False
                                         if DMP_ID in self.gcsf_dict:
@@ -942,7 +888,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                                             self.meds_at_cutoff.append([])
                                     previous_included_dates = current_included_dates
                                     # check if death happens between the cutoffdate and the end of infusion window
-                                    ### check if current_death_date is nan; also only check for the last infusion (idx==0)
+                                    # only for a non-nan death date and the last infusion (idx==0)
                                     if self.competing_risk_death_check and pd.notna(current_death_date) and idx == 0:
                                         print("DMP_ID", DMP_ID, "input_end_date", input_end_date, "current_death_date", current_death_date)
                                         if current_death_date > input_end_date and current_death_date <= input_end_date + 30:
@@ -999,63 +945,51 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                         # Only augment training data with sufficient trajectory length
                         # if not self.val_test_mode and len(dates) >= MIN_TRAJECTORY_FOR_AUGMENTATION:
                         if not self.val_test_mode:
-                            # STRATEGY: Sample up to max_windows_per_patient random windows
-                            # Each window is randomly sampled from the available date range
-                            # Subsequent windows are sampled from dates after the first window's last timepoint
+                            # up to max_windows_per_patient random windows; each later window starts after the previous one ends
                             
-                            # Get max_date constraint for this patient (prevent data leak)
+                            # last discharge date caps the windows (prevents leakage)
                             max_date_constraint = float('inf')
                             if DMP_ID in self.deidentified_DMP_ID_to_icu_admission_discharge_dates_tuple_dict:
                                 max_date_constraint = self.deidentified_DMP_ID_to_icu_admission_discharge_dates_tuple_dict[DMP_ID][-1][1]
                             elif DMP_ID in self.deidentified_DMP_ID_to_hospital_admission_discharge_dates_tuple_dict:
                                 max_date_constraint = self.deidentified_DMP_ID_to_hospital_admission_discharge_dates_tuple_dict[DMP_ID][-1][1]
                             
-                            # Sample windows
                             window_idx = 0
-                            available_dates = dates.copy()  # Start with all dates
+                            available_dates = dates.copy()
                             
                             while window_idx < self.max_windows_per_patient:
-                                # Check if we have enough dates left for at least half a window
                                 # min_required_dates = self.max_time_len // 2  # COMMENTED: too aggressive for large max_time_len
                                 min_required_dates = 10  # Fixed threshold to avoid over-filtering with large max_time_len
                                 if len(available_dates) < min_required_dates:
-                                    break  # Not enough dates left
+                                    break
                                 
-                                # Randomly sample a window from available dates
                                 window = select_random_window(available_dates, k=min(self.max_time_len, len(available_dates)))
                                 
-                                # Verify all dates in window are before max_date_constraint
                                 if max(window) > max_date_constraint:
-                                    break  # Window exceeds constraint, stop sampling
+                                    break
                                 
-                                # Sample independent cutoff but respect max_date constraint
                                 sampled_distance = distances_to_cutoffs[cutoff_idx]
                                 cutoff_idx += 1
                                 cutoffdate = max(window) + sampled_distance
                                 
-                                # Clip to max_date if constraint exists
                                 if max_date_constraint != float('inf'):
                                     cutoffdate = min(cutoffdate, max_date_constraint)
                                 
-                                # Store this window
                                 self.dates.append(window)
                                 self.cutoffdates.append(cutoffdate)
                                 real_DMP_IDs.append(DMP_ID)
                                 self.window_metadata.append((DMP_ID, i, window_idx))
                                 
-                                # Update available_dates: keep only dates after this window's last timepoint
-                                # (excluding the last timepoint itself)
                                 last_date_in_window = max(window)
                                 available_dates = [d for d in available_dates if d > last_date_in_window]
                                 # print("DMP_ID", DMP_ID, "window_idx", window_idx, "window length", len(window), "remaining available_dates", len(available_dates))
                                 window_idx += 1
                         else:
-                            # ORIGINAL: Single random window (val/test or short trajectories)
+                            # val/test: a single random window
                             dates = select_random_window(dates, k=self.max_time_len)
                             cutoffdate = max(dates) + distances_to_cutoffs[cutoff_idx]
                             cutoff_idx += 1
 
-                            # Still respect max_date for single window
                             if DMP_ID in self.deidentified_DMP_ID_to_icu_admission_discharge_dates_tuple_dict:
                                 max_date_constraint = self.deidentified_DMP_ID_to_icu_admission_discharge_dates_tuple_dict[DMP_ID][-1][1]
                                 cutoffdate = min(cutoffdate, max_date_constraint)
@@ -1317,7 +1251,7 @@ class FlexibleFeatureDataset(torch.utils.data.Dataset):
                                 x = (self.X_ts[idx], self.X_dates[idx], current_meds_features, self.num_infusions[idx], DMP_ID, self.gcsf_groundtruth[idx])
                         else:
                             # TODO: change back
-                            ## if num_infusion is not inputted, then do not return num_infusions
+                            # omit num_infusions when include_infusion_dates is off
                             if not self.include_infusion_dates:
                                 x = (self.X_ts[idx], self.X_dates[idx])
                             else:
@@ -1531,7 +1465,7 @@ class FlexibleFeatureDataModule(pl.LightningDataModule):
         # demographic data
         # if task == 'pretrain' or dataset == 'MSK':
         if dataset == 'MSK':
-            ## pretrain has to be done on the MSK model dev set
+            # pretrain uses the MSK model dev set
             path = f'{data_source_path}/MSK'
         
         elif dataset == 'MSK_timeshift':

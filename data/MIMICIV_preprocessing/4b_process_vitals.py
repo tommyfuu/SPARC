@@ -1,6 +1,5 @@
 """
 Process vital signs data from omr.
-Uses vectorized operations for much faster processing.
 """
 
 import os
@@ -40,11 +39,10 @@ def main():
     print("      Full vitals are in ICU chartevents (requires separate download).")
     print()
 
-    # Check if output already exists
     output_file = f'{OUTPUT_PATH}/MIMICIV_subjectid_to_date_to_vitals_values_list_dict.pkl'
 
     if os.path.exists(output_file):
-        print(f"\n⚠️  Output file already exists:")
+        print(f"\nWARNING: Output file already exists:")
         print(f"   - {os.path.basename(output_file)}")
         response = input("\nSkip this step? (y/n): ")
         if response.lower() == 'y':
@@ -52,40 +50,31 @@ def main():
             return
         print("Re-running step 4b...")
 
-    # Load cancer patients
     print("1. Loading cancer patient list...")
     with open(f'{OUTPUT_PATH}/cancer_subject_ids.pkl', 'rb') as f:
         cancer_subjects = set(pickle.load(f))
     print(f"   Cancer patients: {len(cancer_subjects):,}")
 
-    # Load anchor dates
     print("\n2. Loading anchor dates...")
     with open(f'{OUTPUT_PATH}/subject_to_anchor_date_dict.pkl', 'rb') as f:
         anchor_dates = pickle.load(f)
 
-    # Load omr table
     print("\n3. Loading and processing omr.csv.gz...")
     omr_df = pd.read_csv(f'{MIMIC_RAW_PATH}/omr.csv.gz', compression='gzip')
     print(f"   Total omr records: {len(omr_df):,}")
 
-    # Filter to cancer patients
     omr_df = omr_df[omr_df['subject_id'].isin(cancer_subjects)].copy()
     print(f"   Cancer patient omr records: {len(omr_df):,}")
 
-    # Convert chartdate to datetime
     omr_df['chartdate'] = pd.to_datetime(omr_df['chartdate'])
 
-    # Map to anchor dates
     omr_df['anchor'] = omr_df['subject_id'].map(anchor_dates)
     omr_df = omr_df.dropna(subset=['anchor'])
 
-    # Calculate date delta
     omr_df['date_delta'] = (omr_df['chartdate'] - omr_df['anchor']).dt.days
 
     print("\n4. Processing vital signs (vectorized)...")
 
-    # Initialize output structure
-    # Create a dict for each vital sign index
     vital_indices = {
         'BMI (kg/m2)': 0,
         'Blood Pressure': (1, 2),  # Systolic and Diastolic
@@ -98,10 +87,8 @@ def main():
         'Temperature C': 8,
     }
 
-    # Initialize subject_to_date_to_vitals
     subject_to_date_to_vitals = {}
 
-    # Process each vital type
     for result_name, vital_idx in vital_indices.items():
         if result_name not in omr_df['result_name'].values:
             continue
@@ -113,7 +100,6 @@ def main():
             continue
 
         if result_name == 'BMI (kg/m2)':
-            # Convert to float
             vital_data['value'] = pd.to_numeric(vital_data['result_value'], errors='coerce')
             vital_data = vital_data.dropna(subset=['value'])
 
@@ -127,7 +113,6 @@ def main():
                 subject_to_date_to_vitals[sid][date_delta][0] = row['value']
 
         elif result_name == 'Blood Pressure':
-            # Parse blood pressure
             systolic, diastolic = parse_blood_pressure_vectorized(vital_data['result_value'])
             vital_data['systolic'] = systolic
             vital_data['diastolic'] = diastolic
@@ -215,13 +200,11 @@ def main():
         if subject_id not in subject_to_date_to_vitals:
             subject_to_date_to_vitals[subject_id] = {}
 
-    # Print statistics
     print("\n5. Vital signs data statistics:")
     print(f"   Unique patients with vitals: {len([s for s in subject_to_date_to_vitals if subject_to_date_to_vitals[s]]):,}")
     total_encounters = sum(len(dates) for dates in subject_to_date_to_vitals.values())
     print(f"   Total patient-date encounters: {total_encounters:,}")
 
-    # Count data availability
     vital_data_counts = [0] * len(ALL_VITALS)
     for dates in subject_to_date_to_vitals.values():
         for vitals in dates.values():
@@ -236,7 +219,6 @@ def main():
         else:
             print(f"     {vital_name}: No data (ICU chartevents needed)")
 
-    # Save output
     print("\n6. Saving output...")
     with open(output_file, 'wb') as f:
         pickle.dump(subject_to_date_to_vitals, f)

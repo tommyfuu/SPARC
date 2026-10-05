@@ -18,24 +18,20 @@ def main():
     print("Step 8: Checking Individual ItemID Statistics")
     print("="*80)
 
-    # Load lab items dictionary
     print("\n1. Loading d_labitems.csv.gz...")
     d_labitems = pd.read_csv(f'{MIMIC_RAW_PATH}/d_labitems.csv')
     itemid_to_label = dict(zip(d_labitems['itemid'].astype(str), d_labitems['label']))
     print(f"   Loaded {len(itemid_to_label):,} lab item definitions")
 
-    # Load cancer patients
     print("\n2. Loading cancer patient list...")
     with open(f'{OUTPUT_PATH}/cancer_subject_ids.pkl', 'rb') as f:
         cancer_subjects = set(pickle.load(f))
     print(f"   Cancer patients: {len(cancer_subjects):,}")
 
-    # Load anchor dates
     print("\n3. Loading anchor dates...")
     with open(f'{OUTPUT_PATH}/subject_to_anchor_date_dict.pkl', 'rb') as f:
         anchor_dates = pickle.load(f)
 
-    # Create itemid to SPARC test mapping
     print("\n4. Creating itemid to SPARC test mapping...")
     itemid_to_sparc = {}
     sparc_to_itemids = {}
@@ -45,7 +41,6 @@ def main():
         for itemid in itemids:
             itemid_to_sparc[int(itemid)] = sparc_test
 
-    # Load labevents and process
     print("\n5. Loading labevents.csv.gz...")
     print("   This will load the full file into memory...")
 
@@ -56,7 +51,7 @@ def main():
     chunk_size = 5_000_000
     total_rows = 0
 
-    # # generate a simple read of 
+    # # generate a simple read of
     # lab_df = pd.read_csv(f'{MIMIC_RAW_PATH}/labevents.csv.gz', compression='gzip')
     # labitems_df = pd.read_csv(f'{MIMIC_RAW_PATH}/d_labitems.csv.gz', compression='gzip')
     for chunk_idx, chunk in enumerate(pd.read_csv(
@@ -82,15 +77,12 @@ def main():
         print("   No matching lab data found!")
         return
 
-    # Combine all chunks
     print("\n6. Combining chunks...")
     labevents_df = pd.concat(chunks, ignore_index=True)
     print(f"   Total cancer patient lab values: {len(labevents_df):,}")
 
-    # Map itemid to SPARC test
     labevents_df['sparc_test'] = labevents_df['itemid'].map(itemid_to_sparc)
 
-    # Calculate statistics per itemid
     print("\n7. Calculating statistics per itemid...")
     print("\n" + "="*100)
     print("PER-ITEMID STATISTICS")
@@ -103,7 +95,6 @@ def main():
         if not itemids:
             continue
 
-        # Get data for this test
         test_data = labevents_df[labevents_df['sparc_test'] == sparc_test].copy()
 
         if len(test_data) == 0:
@@ -124,7 +115,6 @@ def main():
                 print(f"{itemid:<10} {label:<40} {'No data':>10}")
                 continue
 
-            # Calculate statistics
             values = itemid_data.values
             count = len(values)
             mean = np.mean(values)
@@ -137,9 +127,9 @@ def main():
             # Highlight problematic ones (very high max or std > 100% of mean)
             warning = ""
             if max_val > 10 * mean:
-                warning = " ⚠️ EXTREME MAX"
+                warning = " WARNING: EXTREME MAX"
             elif std > mean:
-                warning = " ⚠️ HIGH STD"
+                warning = " WARNING: HIGH STD"
 
             print(f"{itemid:<10} {label:<40} {count:>10,} {mean:>12.2f} {std:>12.2f} {min_val:>12.2f} {max_val:>12.2f}{warning}")
 
@@ -206,7 +196,6 @@ def main():
             print(f"{row['sparc_test']:<25} {row['itemid']:<10} {row['label']:<30} "
                   f"{row['max_to_mean_ratio']:>10.1f} {row['std_to_mean_ratio']:>10.1f}")
 
-        # Save problematic itemids
         output_file = f'{OUTPUT_PATH}/MIMICIV_problematic_itemids.csv'
         problematic_df.to_csv(output_file, index=False)
         print(f"\nSaved full problematic itemid list to: {output_file}")

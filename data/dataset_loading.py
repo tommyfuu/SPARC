@@ -1,6 +1,4 @@
 """
-dataset_loading.py
-
 Standalone module for loading, normalizing, and splitting all SPARC datasets.
 Import this wherever you need data (training, evaluation, inference).
 
@@ -52,9 +50,7 @@ from MSK_featurename_list import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def load_dataset(
     dataset: str,
@@ -75,62 +71,8 @@ def load_dataset(
     bundle_missingness_rate: float = 0.0,
     bundle_missingness_seed: int = 42,
 ):
-    """
-    Load, normalize, and split all data needed for a SPARC training/evaluation run.
-
-    Parameters
-    ----------
-    dataset : str
-        One of 'MSK', 'MSK_timeshift', 'stanfordEHRSHOT', 'MIMICIV_hosp', or any
-        string containing 'CAIA'.
-    data_source_path : str
-        Base directory where all dataset folders live.
-    option : str
-        Task option, e.g. 'binary', 'pretrain', 'neutropenia_risk', 'AKI_risk', ...
-    modules : str
-        Feature module set: 'all', 'all_labs', 'mutation_clinical', 'practical', or 'parsimonious'.
-    valfold : int
-        0-indexed validation fold (0–9).  Fold 10 is always the held-out test set.
-    mode : str
-        'train', 'test', 'recalibrate', or 'test_recalibrate'.
-    rseed : int
-        Random seed used for data-fraction shuffling and stanfordEHRSHOT splits.
-    competing_risk_death_check : bool
-        Whether to load death-date data for competing risk checks.
-    include_gcsf : bool
-        Whether to load GCSF administration dates (MSK only).
-    data_fraction_option : str
-        'default' uses all training data.  Pass '1/5', '1/25', or '1/125' to
-        down-sample the training split.
-    quick_test : bool
-        If True, use a tiny subset of the data for quick testing of the training loop.
-        This overrides data_fraction_option.
-    normalize : bool
-        If True (default), normalize the data. Set to False to get raw lab values.
-    first_principle : bool
-        If True, use only task-specific lab values (e.g., only creatinine for AKI,
-        only HGB for anemia) instead of all basic labs. Only applies to side-effect tasks.
-    caia_portion: str
-        'prior', 'post', or 'entire' to specify which portion of the MSK-CAIA dataset to load.
-        Ignored for non-MSK-CAIA datasets.
-    med_regimen_eval: bool
-        If True, load the unfiltered medication data (all meds taken on same day) for regimen analysis.
-        If False (default), load the standard filtered medication data (only high-risk meds).
-        Only applies to CAIA datasets.
-
-    Returns
-    -------
-    data_dict_lab_dict : dict
-        Feature dictionaries keyed by module name.
-    modular_featuredim_dict : dict
-        Maps module name → feature dimension (int).
-    split_dict : dict
-        {'train': [...], 'val': [...], 'test': [...]} of patient IDs.
-    component : str
-        Descriptive string used by the data loader (e.g. 'ts_only', 'all').
-    include_infusion_dates : bool
-        Whether infusion-date columns are needed by the data loader.
-    """
+    """Load, normalize and split one SPARC dataset (valfold 0-9; fold 10 is the held-out test set).
+    Returns (data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates)."""
     assert (
         dataset in ['MSK', 'MSK_timeshift', 'stanfordEHRSHOT', 'MIMICIV_hosp']
         or 'CAIA' in dataset
@@ -144,16 +86,12 @@ def load_dataset(
     data_dict_lab_dict = {}
     modular_featuredim_dict = {}
 
-    # ------------------------------------------------------------------
     # 1. CAIA datasets: load from a single JSON bundle
-    # ------------------------------------------------------------------
     caia_shared = {}   # populated if 'CAIA' in dataset; re-used across blocks below
     if 'CAIA' in dataset:
         caia_shared = _load_caia(dataset, data_source_path, caia_portion=caia_portion, med_regimen_eval=med_regimen_eval)
 
-    # ------------------------------------------------------------------
     # 2. Demographic data (cancer type, death date, last-contact date)
-    # ------------------------------------------------------------------
     DMP_ID_to_PRIMARY_CTYPE_dict = {}
     DMP_ID_to_DATES_to_TESTSVALUES_DICT = {}  # populated when labs are loaded
 
@@ -184,16 +122,12 @@ def load_dataset(
             dataset, data_source_path, option, competing_risk_death_check, data_dict_lab_dict,
         )
 
-    # ------------------------------------------------------------------
     # 3. Hospital / ICU admission-discharge dates
-    # ------------------------------------------------------------------
     data_dict_lab_dict = _load_admission_dates(
         dataset, data_source_path, option, data_dict_lab_dict, caia_shared,
     )
 
-    # ------------------------------------------------------------------
     # 4. Medication data  (side-effect tasks)
-    # ------------------------------------------------------------------
     se_task = bool(re.match(
         r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$',
         option,
@@ -204,9 +138,7 @@ def load_dataset(
             dataset, data_source_path, data_dict_lab_dict, DMP_ID_to_DATES_to_TESTSVALUES_DICT, caia_shared,
         )
 
-    # ------------------------------------------------------------------
     # 5. Lab values
-    # ------------------------------------------------------------------
     if (
         'basic_lab' in data_modules_to_include
         or 'extra_lab' in data_modules_to_include
@@ -223,9 +155,7 @@ def load_dataset(
             DMP_ID_to_DATES_to_TESTSVALUES_DICT, first_principle,
         )
 
-    # ------------------------------------------------------------------
     # 6. Vital signs
-    # ------------------------------------------------------------------
     if 'basic_vitals' in data_modules_to_include or 'extra_vitals' in data_modules_to_include:
         data_dict_lab_dict, modular_featuredim_dict = _load_vitals(
             dataset, data_source_path, option, data_modules_to_include,
@@ -233,9 +163,7 @@ def load_dataset(
             DMP_ID_to_DATES_to_TESTSVALUES_DICT, caia_shared, first_principle,
         )
 
-    # ------------------------------------------------------------------
     # 7. Static demographic features (gender, age)
-    # ------------------------------------------------------------------
     if 'gender' in data_modules_to_include:
         data_dict_lab_dict, modular_featuredim_dict = _load_gender(
             dataset, data_source_path, data_dict_lab_dict, modular_featuredim_dict,
@@ -249,9 +177,7 @@ def load_dataset(
             caia_shared,
         )
 
-    # ------------------------------------------------------------------
     # 8. Genomic / clinical features
-    # ------------------------------------------------------------------
     if 'mutation' in data_modules_to_include:
         data_dict_lab_dict, modular_featuredim_dict = _load_mutation(
             dataset, data_source_path, data_dict_lab_dict, modular_featuredim_dict,
@@ -266,9 +192,7 @@ def load_dataset(
 
     print("modular_featuredim_dict", modular_featuredim_dict)
 
-    # ------------------------------------------------------------------
     # 9. Normalization (with caching)
-    # ------------------------------------------------------------------
     if normalize:
         data_dict_lab_dict = _normalize(
             dataset, data_source_path, modules, data_dict_lab_dict, first_principle,
@@ -277,17 +201,13 @@ def load_dataset(
     else:
         print("skipping normalization (normalize=False)")
 
-    # ------------------------------------------------------------------
     # 9b. Bundle missingness (resource-scarce simulation)
-    # ------------------------------------------------------------------
     if bundle_missingness_rate > 0.0:
         data_dict_lab_dict = _apply_bundle_missingness(
             data_dict_lab_dict, bundle_missingness_rate, bundle_missingness_seed,
         )
 
-    # ------------------------------------------------------------------
     # 10. Train / val / test splits
-    # ------------------------------------------------------------------
     split_dict = _build_splits(
         dataset, data_source_path, option, mode, valfold, rseed,
         data_fraction_option, DMP_ID_to_DATES_to_TESTSVALUES_DICT,
@@ -299,17 +219,10 @@ def load_dataset(
     return data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates
 
 
-# ---------------------------------------------------------------------------
 # Private helpers
-# ---------------------------------------------------------------------------
 
 def _get_first_principle_indices(option: str):
-    """
-    Map task option to specific lab/vital indices for first-principle models.
-
-    Returns:
-        tuple: (lab_indices, vital_indices, lab_featdim, vital_featdim)
-    """
+    """Return (lab_indices, vital_indices, lab_featdim, vital_featdim) for first-principle tasks."""
     if bool(re.match(r'^(febrile_neutropenia)(_next_risk|_risk)?$', option)):
         return (
             [WBC_INDEX],
@@ -366,15 +279,8 @@ def _resolve_modules(modules):
 
 
 def _load_caia(dataset, data_source_path, caia_portion='prior', med_regimen_eval=False):
-    """
-    Load the single CAIA JSON bundle and return a dict of de-identified sub-dicts.
-
-    Args:
-        dataset: Dataset name (e.g., 'MSK_CAIA')
-        data_source_path: Base path to data
-        caia_portion: 'prior', 'post', or 'entire' for temporal splitting
-        med_regimen_eval: If True, load unfiltered meds (all meds on same day) for regimen analysis
-    """
+    """Load the CAIA JSON bundle as a dict of sub-dicts, cut to caia_portion ('prior', 'post', 'entire').
+    med_regimen_eval=True loads the unfiltered meds."""
     def custom_decoder(d):
         if "__set__" in d:
             return set(d["__set__"])
@@ -429,16 +335,14 @@ def _load_caia(dataset, data_source_path, caia_portion='prior', med_regimen_eval
     }
 
     if dataset == 'MSK_CAIA':
-        # if caia_portion is entire, keep it as is; 
-        # if prior, for all patientss, remove any data after 2021 by matching to data after the cutoff_day as enlisted in DMP_ID_to_cutoff_day_dict
-        # if post, for all patients, remove any data before 2021 by matching to data before or on the cutoff_day as enlisted in DMP_ID_to_cutoff_day_dict
-        ## note that not for the same patient it might not be in all the dicts, e.g. some patients might not have ICU admissions but have hospital admissions, or some patients might not have labs but have meds, etc. so we need to loop through all dicts and check for the presence of the patient id before applying the cutoff
-        ### calculate average number of lab/vital dates per patient overall, prior to cutoff, and post/on cutoff to confirm that the cutoff is doing something reasonable
+        # prior: keep data on/before each patient's cutoff_day; post: keep data after it; entire: no cut.
+        # A patient may be missing from some dicts, so each dict is checked separately.
+        # First report lab/vital dates per patient before/after the cutoff as a sanity check.
         cutoff_dict_raw = raw.get('DMP_ID_to_cutoff_day_dict', {})
         num_lab_vital_dates_overall, num_lab_vital_dates_prior, num_lab_vital_dates_post = 0, 0, 0
         pids_w_cutoff = set()
         for pid, dates in shared['labs'].items():
-            # Skip patients not in cutoff_dict (their first lab was after the cutoff date, but included in the dataset as their first exposure day is prior from other dfs)
+            # not in cutoff_dict: first lab after the cutoff (included via other dicts)
             if str(pid) not in cutoff_dict_raw:
                 continue
             pids_w_cutoff.add(pid)
@@ -457,7 +361,7 @@ def _load_caia(dataset, data_source_path, caia_portion='prior', med_regimen_eval
             print(f"Average number of lab/vital dates per patient post/on cutoff: {num_lab_vital_dates_post / num_patients_with_cutoff:.2f}")
         else:
             print(f"Warning: No patients have cutoff_day data in this dataset")
-        
+
         cutoff_dict = {int(k): v for k, v in raw['DMP_ID_to_cutoff_day_dict'].items()}
         if caia_portion == 'prior':
             print("Loading prior portion of CAIA dataset (data on or before cutoff day)")
@@ -551,7 +455,6 @@ def _load_msk_demographics(dataset, data_source_path, option, competing_risk_dea
         df = df_ts  # expose the timeshift df as the demographic df
 
     # if include_gcsf:
-    # Follows data_source_path; was hardcoded to the old /data/morrisq mount.
     with open(f'{data_source_path}/DMP_ID_to_gcsf_startdates_dict.pickle', 'rb') as f:
         data_dict_lab_dict['gcsf_dict'] = pickle.load(f)
 
@@ -1031,29 +934,29 @@ def _load_mutation(dataset, data_source_path, data_dict_lab_dict, modular_featur
                          'impact_genomic_ft', 'output_050725',
                          'impact_genomic_ft_341.csv'))
         df = pd.read_csv(_genomic_ft)
-    elif dataset == 'MSK_timeshift': # this actually does NOT exusr
+    elif dataset == 'MSK_timeshift': # does not exist
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725_timeshift/timeshift_feature_table_full_first_341_harmonized.csv')
         raise ValueError(f"Mutation features not available for dataset: {dataset}")
     else:
         raise ValueError(f"Mutation features not available for dataset: {dataset}")
-    cols_to_drop = [                                                                                                                                     
-        'Unnamed: 0',                                                                                                                                    
-        'SAMPLE_ID',                                                                                                                                     
-        'MONTH_ADDED',                                                                                                                                   
-        'WEEK_ADDED',                                                                                                                                    
-        'GENE_PANEL',                                                                                                                                    
-        'CANCER_TYPE',                                                                                                                                   
-        'CANCER_TYPE_DETAILED',                                                                                                                          
-        'SAMPLE_TYPE',                                                                                                                                   
-        'PRIMARY_SITE',                                                                                                                                  
-        'METASTATIC_SITE',                                                                                                                               
-        'ANCESTRY_LABEL',                                                                                                                                
-        'YOST_INDEX_IMPUTED_MEDIAN',                                                                                                                     
-        'CURRENT_AGE_DEID',                                                                                                                              
-        'SEX',                                                                                                                                           
+    cols_to_drop = [
+        'Unnamed: 0',
+        'SAMPLE_ID',
+        'MONTH_ADDED',
+        'WEEK_ADDED',
+        'GENE_PANEL',
+        'CANCER_TYPE',
+        'CANCER_TYPE_DETAILED',
+        'SAMPLE_TYPE',
+        'PRIMARY_SITE',
+        'METASTATIC_SITE',
+        'ANCESTRY_LABEL',
+        'YOST_INDEX_IMPUTED_MEDIAN',
+        'CURRENT_AGE_DEID',
+        'SEX',
         'Classification_Category',
-        'MSI_TYPE'                                                                                                                       
-    ]     
+        'MSI_TYPE'
+    ]
     # df = df.drop(columns=['YOST_INDEX_IMPUTED_MEDIAN', 'CURRENT_AGE_DEID', 'SEX'])
     df = df.drop(columns=cols_to_drop)
 
@@ -1064,8 +967,8 @@ def _load_mutation(dataset, data_source_path, data_dict_lab_dict, modular_featur
     feat_cols = [c for c in df.columns if c != 'PATIENT_ID']
     data_dict_lab_dict['mutation'] = dict(zip(df['PATIENT_ID'], df[feat_cols].values))
     modular_featuredim_dict['mutation'] = MSK_numfeature_dict['mutation']
-    return data_dict_lab_dict, modular_featuredim_dict                                                                              
-                                                                  
+    return data_dict_lab_dict, modular_featuredim_dict
+
 def _load_clinical(dataset, data_source_path, data_dict_lab_dict, modular_featuredim_dict,
                    DMP_ID_to_PRIMARY_CTYPE_dict, PRIMARY_CTYPES, dePHIed_demographic_df):
     print("CLINICAL FEATURES")
@@ -1078,7 +981,7 @@ def _load_clinical(dataset, data_source_path, data_dict_lab_dict, modular_featur
                          'impact_genomic_ft', 'output_050725',
                          'impact_genomic_ft_341.csv'))
         df = pd.read_csv(_genomic_ft)
-    elif dataset == 'MSK_timeshift': # this actually does NOT exusr
+    elif dataset == 'MSK_timeshift': # does not exist
         # df = pd.read_csv('/data/morrisq/fuc/impact_genomic_ft/outputs_050725_timeshift/timeshift_feature_table_full_first_341_harmonized.csv')
         raise ValueError(f"Mutation features not available for dataset: {dataset}")
     else:
@@ -1102,42 +1005,8 @@ def _load_clinical(dataset, data_source_path, data_dict_lab_dict, modular_featur
 
 
 def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
-    """
-    Simulate resource-scarce clinical settings by dropping entire lab/vital bundles.
-
-    For each encounter (patient × date) and each bundle, the ENTIRE bundle is
-    absent (all features set to np.nan) with probability `rate`, independently
-    per encounter. This reflects the clinical reality that panels are ordered — or
-    not — as a unit: if a CBC wasn't ordered or the sample was lost, none of the
-    CBC values are available.
-
-    Missing features are set to np.nan, matching the pipeline's existing
-    convention for unmeasured values. The data loader uses nanmean aggregation,
-    so NaN entries are correctly excluded rather than treated as mean values.
-
-    Bundles within basic_lab (23 features = BASIC_TESTS = RBC_CBC_TESTS + BMP_TESTS + LFT_TESTS):
-        CBC:    indices  0-8  (RBC, MCV, MCH, MCHC, RDW, HGB, HCT, WBC, Platelets)  — 9 features
-        BMP:    indices  9-16 (Glucose, Calcium, Sodium, Potassium, CO2, Creatinine, Chloride, BUN) — 8 features
-        LFT:    indices 17-22 (Albumin, Protein Total, ALP, ALT, AST, Bilirubin Total) — 6 features
-
-    Bundles within basic_vitals (7 features = BASIC_VITALS):
-        Vitals: indices  0-6  (BMI, BP Sys, BP Dia, O2, Pulse, Resp, Temp) — 7 features
-
-    Parameters
-    ----------
-    data_dict_lab_dict : dict
-        Nested dict {module: {pid: {date: [feature_values]}}}.
-        Modified in-place.
-    rate : float
-        Probability that an entire bundle is absent at a given encounter (0–1).
-    seed : int
-        Global seed for reproducible per-encounter bundle-absence draws.
-
-    Returns
-    -------
-    data_dict_lab_dict : dict
-        The same dict, with dropped bundle features set to np.nan per encounter.
-    """
+    """Simulate resource-scarce settings: at each (patient, date) encounter each lab/vital bundle
+    (CBC, BMP, LFT, vitals) is set to NaN as a whole with probability `rate`. Modifies in place."""
     from MSK_featurename_list import BASIC_TESTS, BASIC_VITALS
 
     # Bundle definitions: {module: {bundle_name: [feature_indices_within_module]}}
@@ -1177,8 +1046,7 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
         print(f"[bundle_missingness] {module}: whole-bundle dropout, rate={rate}, "
               f"bundles: { {b: len(v) for b, v in clipped_bundles.items()} }")
 
-        # Sort encounters for stable ordering regardless of dict insertion order.
-        # Stability ensures the same masks are produced across runs on the same dataset.
+        # sorted so masks are reproducible across runs
         encounters = sorted(
             (pid, d) for pid in feature_dict for d in feature_dict[pid]
         )
@@ -1186,8 +1054,7 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
         if n_enc == 0:
             continue
 
-        # Stack all encounter feature vectors into a 2D float array (n_enc, n_features).
-        # After _normalize(), all values are already float or np.nan.
+        # (n_enc, n_features)
         data_array = np.array(
             [feature_dict[pid][d] for pid, d in encounters], dtype=float
         )
@@ -1199,23 +1066,20 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
         #     if n_mask == 0:
         #         continue
         #     valid_arr = np.array(valid)
-        #     # Seed is (global_seed, module_id, bundle_position) — fully deterministic,
+        #     # Seed is (global_seed, module_id, bundle_position); fully deterministic,
         #     # no Python hash() or md5 needed.
         #     b_rng = np.random.default_rng([seed, MODULE_IDS[module], b_idx])
-        #     # Shape: (n_enc, len(valid)) — each row is an independent permutation.
+        #     # Shape: (n_enc, len(valid)); each row is an independent permutation.
         #     all_perms = b_rng.permuted(np.tile(valid_arr, (n_enc, 1)), axis=1)
         #     # Fancy-index NaN assignment: rows = encounter indices, cols = masked features.
         #     data_array[np.arange(n_enc)[:, None], all_perms[:, :n_mask]] = np.nan
 
-        # [OPTION B - whole-bundle Bernoulli dropout]
-        # For each bundle, the ENTIRE panel is absent with probability `rate`, independently
-        # per encounter. Clinically: a panel either was ordered and resulted, or wasn't — not
-        # partially missing.
+        # whole-bundle Bernoulli dropout per encounter
         for b_idx, (bundle_name, valid) in enumerate(clipped_bundles.items()):
             if not valid:
                 continue
             valid_arr = np.array(valid)
-            # Seed is (global_seed, module_id, bundle_position) — fully deterministic.
+            # seed is (global_seed, module_id, bundle_position)
             b_rng = np.random.default_rng([seed, MODULE_IDS[module], b_idx])
             # Bernoulli draw: True = entire bundle absent at this encounter.
             absent = b_rng.random(n_enc) < rate  # shape (n_enc,)
@@ -1223,7 +1087,7 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
             if absent_rows.size > 0:
                 data_array[np.ix_(absent_rows, valid_arr)] = np.nan
 
-        # Write results back; tolist() converts numpy float64 → Python float (NaN preserved).
+        # Write results back: tolist() converts numpy float64 → Python float (NaN preserved).
         for enc_idx, (pid, d) in enumerate(encounters):
             feature_dict[pid][d] = data_array[enc_idx].tolist()
 
@@ -1231,13 +1095,8 @@ def _apply_bundle_missingness(data_dict_lab_dict, rate, seed):
 
 
 def _normalize(dataset, data_source_path, modules, data_dict_lab_dict, first_principle=False):
-    """
-    Normalize numeric time-series features in-place using per-feature z-scores.
-    Persists the normalized data dict and normalization factors to disk so
-    subsequent runs skip recomputation.
-
-    For first-principle runs, caching is disabled since different tasks use different features.
-    """
+    """Z-score normalize time-series features in place, caching the result and factors to disk
+    (no caching for first-principle runs)."""
     # Skip caching for first-principle runs (different tasks = different features)
     if first_principle:
         use_cache = False
@@ -1264,8 +1123,7 @@ def _normalize(dataset, data_source_path, modules, data_dict_lab_dict, first_pri
           os.path.exists(normalized_data_path) if normalized_data_path is not None else None,
           os.path.exists(norm_factor_path) if norm_factor_path is not None else None)
 
-    # Define clinical ranges for filtering outliers during NORMALIZATION CALCULATION ONLY (MIMIC-IV)
-    # These ranges are only applied when computing mean/std, NOT to the actual data
+    # MIMIC-IV outlier ranges, used only when computing mean/std (the data itself is not clipped)
     mimic_filtering_ranges = None
     if dataset == 'MIMICIV_hosp':
         print("  Using filtered values for MIMIC-IV normalization calculation (data unchanged)")
@@ -1476,7 +1334,7 @@ def _build_splits(dataset, data_source_path, option, mode, valfold, rseed,
 
     else:
         raise ValueError(f"Unknown dataset for split building: {dataset!r}")
-    
+
     if quick_test:
         for split in split_dict:
             split_dict[split] = split_dict[split][:512*4]

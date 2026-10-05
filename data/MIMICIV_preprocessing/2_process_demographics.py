@@ -11,9 +11,9 @@ from tqdm import tqdm
 from config import MIMIC_RAW_PATH, OUTPUT_PATH
 
 def main():
-    print("="*80)
+    print()
     print("Step 2: Processing Demographics")
-    print("="*80)
+    print()
 
     # Check if outputs already exist
     output_files = [
@@ -25,7 +25,7 @@ def main():
     ]
 
     if all(os.path.exists(f) for f in output_files):
-        print("\n⚠️  Output files already exist:")
+        print("\nWARNING: Output files already exist:")
         for f in output_files:
             print(f"   - {os.path.basename(f)}")
         response = input("\nSkip this step? (y/n): ")
@@ -144,9 +144,9 @@ def main():
         pickle.dump(first_admission, f)
     print(f"   Saved: subject_to_anchor_date_dict.pkl")
 
-    print("\n" + "="*80)
+    print()
     print("Step 2 Complete!")
-    print("="*80)
+    print()
 
 if __name__ == '__main__':
     main()

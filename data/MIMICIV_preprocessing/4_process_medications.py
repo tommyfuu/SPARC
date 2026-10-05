@@ -33,7 +33,7 @@ def main():
     output_file = f'{OUTPUT_PATH}/MIMICIV_subjectid_to_date_to_all_medications_wdosage_dict.pkl'
 
     if os.path.exists(output_file):
-        print(f"\n⚠️  Output file already exists:")
+        print(f"\nWARNING: Output file already exists:")
         print(f"   - {os.path.basename(output_file)}")
         response = input("\nSkip this step? (y/n): ")
         if response.lower() == 'y':
@@ -81,7 +81,7 @@ def main():
     print(f"   Total rows: {total_rows:,}, Matched: {matched_rows:,}")
 
     if not emar_chunks:
-        print("\n⚠️  No medication data found!")
+        print("\nWARNING: No medication data found!")
         with open(output_file, 'wb') as f:
             pickle.dump({}, f)
         return
@@ -212,7 +212,7 @@ def main():
         for drug in sorted(high_risk_counts.keys()):
             print(f"     {drug}: {high_risk_counts[drug]:,} administrations")
     else:
-        print(f"\n   ⚠️  No high-risk drugs found in dataset!")
+        print(f"\n   WARNING: No high-risk drugs found in dataset!")
 
     # Save output
     print("\n9. Saving output...")

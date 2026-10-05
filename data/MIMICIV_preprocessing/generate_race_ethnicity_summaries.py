@@ -134,16 +134,8 @@ def main():
     for _, row in ethnicity_df.iterrows():
         print(f"     {row['ethnicity_concept_name']}: {row['count']:,}")
 
-    # ------------------------------------------------------------------
-    # Patient-level export
-    # ------------------------------------------------------------------
-    # The CSVs above are aggregated over `cancer_subjects`, which is a
-    # slightly wider population than the SPARC modelling cohort that
-    # load_dataset() returns — hence MIMIC's counts run ~51 patients over
-    # n_patients. Emitting the per-patient mapping lets the counts be
-    # re-aggregated against the actual cohort downstream
-    # (see cohort_summaries/generate_race_ethnicity_cohort.py), which keeps
-    # the totals correct even if the cohort definition later changes.
+    # Patient-level export, so counts can be re-aggregated against the actual
+    # modelling cohort (cancer_subjects is slightly wider than load_dataset()).
     print("\n5. Writing patient-level race/ethnicity map...")
     patient_level = {
         int(subject_id): (race_standard[subject_id], ethnicity_status[subject_id])
