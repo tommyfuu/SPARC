@@ -1,22 +1,8 @@
-"""
-Per-task temporal-dependency metrics and figures from LIME attributions.
+"""Per-task temporal-dependency metrics and figures from LIME attributions.
 
-Dates are reverse-sorted before being fed to the model (see
-data_loaders_inf_risk_fixed.py, last_days_dates()): t=0 is the most recent
-measurement before the prediction cutoff, t=19 is the earliest.
-
-time_importance uses mean-then-abs aggregation (average the signed LIME
-value over instances per fold, then take the absolute value, then average
-over folds/features), matching lime_importance_risk_fixed.py's convention.
-
-Per task, reports:
-  - Gini-based temporal uniformity, plus the peak timepoint and its
-    dominance over the median of the rest (Gini alone is insensitive to a
-    single spike among 20 timepoints).
-  - Mean/median historical-vs-recent importance ratio (t=1-19 vs t=0).
-  - Sum(historical)/recent ratio and the % of total importance coming from
-    history, each benchmarked against the flat/no-recency-effect null
-    (19/20 = 95%).
+t=0 is the most recent visit before the prediction cutoff, t=19 the earliest (dates are reverse-sorted
+in data_loaders_inf_risk_fixed.py). Importance uses mean-then-abs aggregation, as in lime_importance_risk_fixed.py.
+Usage: python visualize_temporal_dependency_clarified.py [--gini table|time]
 """
 
 import pickle
@@ -43,8 +29,17 @@ for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
         sys.path.insert(0, _p)
 import sparc_paths
 
-base_path = sparc_paths.SPARC_MODEL_ROOT + '/results_vis_060726/lime_fixed/'
-out_path = sparc_paths.SPARC_MODEL_ROOT + '/results_vis_060726/lime_fixed/'
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument('--gini', choices=['table', 'time'], default='table',
+                 help="x-axis of the scatter. 'table' (default): 1 - Gini over every "
+                      "timepoint x feature cell of the importance table (20 x 38), so features are "
+                      "not averaged away first; saved as temporal_dependency_scatter_clarified_tablegini. "
+                      "'time': the original 1 - Gini of the feature-averaged 20-timepoint vector "
+                      "(temporal_dependency_scatter_clarified).")
+GINI_MODE = _ap.parse_args().gini
+base_path = sparc_paths.SPARC_LIME_BF_DIR + '/'
+out_path = sparc_paths.SPARC_LIME_BF_DIR + '/'
 
 # Task configuration
 tasks = [
@@ -67,7 +62,7 @@ task_display_names = {
     'binary_icu_pre': '30D ICU mort.'
 }
 
-# Parameters from script
+# Input layout (parsimonious module)
 T_MAX = 20
 base_features = 37  # parsimonious module
 F_TOTAL = 2 * (base_features + 1) + 1  # 77
@@ -102,64 +97,60 @@ for task in tasks:
     # Stack: [n_folds, n_instances, T, n_actual]
     all_folds = np.array(fold_lime_values)
 
-    # Per-timepoint importance: average the signed LIME value over instances
-    # per fold, take the absolute value, then average over folds/features.
+    # Mean-then-abs: signed mean over instances per fold, then abs, then mean over folds (and features).
     per_fold_signed_mean = all_folds.mean(axis=1)                       # [n_folds, T, n_actual], signed
     time_importance = np.abs(per_fold_signed_mean).mean(axis=(0, 2))    # [T]
+    importance_table = np.abs(per_fold_signed_mean).mean(axis=0)        # [T, n_actual]
 
-    # Gini coefficient of the 20-timepoint distribution; 1-Gini so that
-    # higher = more evenly spread, lower = concentrated on few timepoints.
+    # --gini time: 1 - Gini of the 20-timepoint vector (higher = more even).
     sorted_importance = np.sort(time_importance)
     n = len(sorted_importance)
     cumsum = np.cumsum(sorted_importance)
     gini = (2.0 * np.sum((np.arange(1, n+1) * sorted_importance))) / (n * cumsum[-1]) - (n + 1.0) / n
     temporal_uniformity_gini = 1.0 - gini
 
-    # Historical (t=1-19) vs. most-recent (t=0) importance ratio, per
-    # timepoint (mean and median), not a sum. >1 = a typical historical
-    # timepoint matters more than the most recent one; <1 = recency
-    # dominates.
-    recent_tp_importance = np.abs(all_folds[:, :, 0, :]).mean()
+    # --gini table (default): 1 - Gini over all T x n_actual timepoint x feature cells,
+    # so it mixes concentration across features with concentration across time.
+    _cells = np.sort(importance_table.ravel())
+    _n = _cells.size
+    table_gini = (2.0 * np.sum(np.arange(1, _n + 1) * _cells)) / (_n * _cells.sum()) - (_n + 1.0) / _n
+    table_uniformity_gini = 1.0 - table_gini
+
+    # Per-timepoint history (t=1-19, mean/median) vs most recent (t=0); <1 means recency dominates.
+    recent_tp_importance = time_importance[0]
     historical_tp_values = time_importance[1:]  # [19], t=1..19
     mean_historical_tp_importance = historical_tp_values.mean()
     median_historical_tp_importance = np.median(historical_tp_values)
     mean_historical_vs_recent_ratio = mean_historical_tp_importance / (recent_tp_importance + 1e-10)
     median_historical_vs_recent_ratio = median_historical_tp_importance / (recent_tp_importance + 1e-10)
 
-    # Cumulative importance share: total across all 19 historical timepoints
-    # vs. the single most recent one. A genuine sum, answering a different
-    # question from the per-timepoint ratio above (total explanatory mass,
-    # not "does a typical earlier visit matter as much").
+    # Summed history vs t=0, and each side's share of the total.
     sum_historical_tp_importance = historical_tp_values.sum()
     sum_historical_vs_recent_ratio = sum_historical_tp_importance / (recent_tp_importance + 1e-10)
     total_importance_all20 = time_importance.sum()
     pct_importance_from_history = 100.0 * sum_historical_tp_importance / (total_importance_all20 + 1e-10)
     pct_importance_from_recent = 100.0 * recent_tp_importance / (total_importance_all20 + 1e-10)
 
-    # Peak timepoint and how far it stands above the rest -- Gini alone
-    # under-weights a single spike among 20 categories, so surface this
-    # explicitly. peak_timepoint=0 means the most recent measurement.
+    # Peak timepoint vs the median of the rest; Gini barely registers a single spike.
     peak_timepoint = int(np.argmax(time_importance))
     peak_value = time_importance[peak_timepoint]
     rest_values = np.delete(time_importance, peak_timepoint)  # the other 19
     median_of_rest = np.median(rest_values)
     peak_to_rest_ratio = peak_value / (median_of_rest + 1e-10)
 
-    # Normalized entropy of the timepoint distribution: 1 = uniform, 0 =
-    # concentrated on one timepoint. Independent cross-check on Gini.
+    # Normalised entropy over timepoints (1 = uniform), a cross-check on Gini.
     time_prob = time_importance / (time_importance.sum() + 1e-10)
     temporal_entropy = entropy(time_prob)
     temporal_utilization = temporal_entropy / np.log(T_MAX)
 
-    # 5-timepoint block ratio: oldest5/recent5, so >1 means the 5 oldest
-    # timepoints matter more than the 5 most recent (consistent direction
-    # with the historical/recent ratio above).
+    # oldest 5 / most recent 5; >1 means the oldest timepoints matter more.
     recent5_importance = time_importance[:5].mean()
     oldest5_importance = time_importance[-5:].mean()
     oldest5_vs_recent5_ratio = oldest5_importance / (recent5_importance + 1e-10)
 
     task_metrics[task] = {
         'temporal_uniformity_gini': temporal_uniformity_gini,
+        'table_uniformity_gini': table_uniformity_gini,
         'temporal_utilization_entropy': temporal_utilization,
         'mean_historical_vs_recent_ratio': mean_historical_vs_recent_ratio,
         'median_historical_vs_recent_ratio': median_historical_vs_recent_ratio,
@@ -179,13 +170,14 @@ for task in tasks:
     }
 
     print(f"  Temporal Uniformity (1-Gini):          {temporal_uniformity_gini:.4f} (1=equal, 0=concentrated)")
+    print(f"  Table Uniformity (1-Gini, T x F):      {table_uniformity_gini:.4f} (all timepoint x feature cells)")
     print(f"  Temporal Utilization (entropy):        {temporal_utilization:.4f} (1=equal, 0=concentrated)")
     print(f"  Mean Historical/Recent Ratio:          {mean_historical_vs_recent_ratio:.4f}  "
-          f"(mean of t=1-19 [history] vs t=0 [most recent], NOT a sum)")
+          f"(mean of t=1-19 [history] vs t=0 [most recent], not a sum)")
     print(f"  Median Historical/Recent Ratio:        {median_historical_vs_recent_ratio:.4f}  "
           f"(robust to a single outlier historical timepoint)")
     print(f"  Sum(historical)/Recent Ratio:          {sum_historical_vs_recent_ratio:.2f}x  "
-          f"(TOTAL of t=1-19 vs t=0 -- a genuine sum, unlike the mean/median above)")
+          f"(total of t=1-19 vs t=0)")
     print(f"  Importance share: history={pct_importance_from_history:.1f}%  "
           f"most-recent={pct_importance_from_recent:.1f}%")
     print(f"  Peak timepoint:                        t={peak_timepoint} "
@@ -194,7 +186,7 @@ for task in tasks:
     print(f"  Most-recent (t=0) Importance:          {recent_tp_importance:.6f}")
     print(f"  Oldest5(t=15-19)/Recent5(t=0-4) Ratio: {oldest5_vs_recent5_ratio:.4f}\n")
 
-# VISUALIZATION: 2D scatter plot only
+# Figures
 
 # Task colors: Okabe-Ito colorblind-safe palette
 TASK_COLORS = {
@@ -210,15 +202,9 @@ TASK_COLORS = {
 tasks_to_plot = [t for t in tasks if t in task_metrics]
 colors = [TASK_COLORS[t] for t in tasks_to_plot]
 
-# Headline figure: cumulative importance share (history vs. the single most
-# recent measurement), sorted by history share, with the flat/no-recency-
-# effect null baseline drawn in. With 19 historical timepoints vs. 1 recent
-# one, a model with zero true recency effect would already show 19/20 = 95%
-# "historical share" from the group-size split alone, so 95% -- not 0% or
-# 50% -- is the right reference point; a task's share above vs. below that
-# line indicates whether history is over- or under-weighted relative to
-# naive equal-per-timepoint weighting.
-NULL_HISTORY_SHARE = 100.0 * 19 / 20  # flat/no-time-dependence baseline
+# Bar: history vs t=0 share, sorted. The null is 95%, not 50%: with 19 historical
+# timepoints vs 1 recent, equal per-timepoint weighting already gives 19/20.
+NULL_HISTORY_SHARE = 100.0 * 19 / 20
 
 order = sorted(tasks_to_plot, key=lambda t: task_metrics[t]['pct_importance_from_history'])
 hist_pct = [task_metrics[t]['pct_importance_from_history'] for t in order]
@@ -259,16 +245,12 @@ plt.savefig(f'{out_path}/temporal_history_share_barh.pdf', dpi=300, bbox_inches=
 print(f"Saved: {out_path}/temporal_history_share_barh.pdf")
 plt.close()
 
-# Scatter: Temporal Uniformity vs Sum(historical)/Recent Ratio. Fixed marker
-# size, task identity via a side legend (no in-plot annotations/arrows). The
-# y-axis is a genuine SUM comparison -- total importance across the 19
-# historical timepoints vs the single most recent one -- not a per-timepoint
-# mean/median. A dotted line at y=1 marks where history's total exactly
-# equals the recent point's importance.
+# Scatter: 1 - Gini (per --gini) vs Sum(historical)/recent; dashed y=1 = equal totals.
 
-fig, ax = plt.subplots(figsize=(8, 6.5))
+fig, ax = plt.subplots(figsize=(11, 6.5))
 
-uniformity_values = [task_metrics[t]['temporal_uniformity_gini'] for t in tasks_to_plot]
+_gini_key = 'table_uniformity_gini' if GINI_MODE == 'table' else 'temporal_uniformity_gini'
+uniformity_values = [task_metrics[t][_gini_key] for t in tasks_to_plot]
 sum_ratios = [task_metrics[t]['sum_historical_vs_recent_ratio'] for t in tasks_to_plot]
 
 AXIS_GREY = '#4d4d4d'
@@ -283,7 +265,8 @@ ax.axhline(1.0, color=AXIS_GREY, linestyle='--', linewidth=1.2, zorder=2,
 
 ax.set_title('Temporal dependency: history vs. most-recent measurement',
               fontsize=14, fontweight='bold', color='black')
-ax.set_xlabel('Temporal uniformity (1 − Gini)', fontsize=12, color=AXIS_GREY)
+ax.set_xlabel('Uniformity of importance across timepoints × features (1 − Gini)' if GINI_MODE == 'table'
+              else 'Temporal uniformity (1 − Gini)', fontsize=12, color=AXIS_GREY)
 ax.set_ylabel('Sum(historical) / most-recent importance ratio', fontsize=12, color=AXIS_GREY)
 ax.margins(x=0.12, y=0.12)
 ax.grid(True, linestyle='-', linewidth=0.8, color='#e0e0e0', zorder=0)
@@ -297,30 +280,34 @@ ax.tick_params(colors=AXIS_GREY, labelsize=10)
 ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10,
           labelspacing=1.4, handletextpad=0.8, borderaxespad=0.5)
 
-plt.tight_layout()
-plt.savefig(f'{out_path}/temporal_dependency_scatter_clarified.pdf', dpi=300, bbox_inches='tight')
-print(f"Saved: {out_path}/temporal_dependency_scatter_clarified.pdf")
+# Fixed margins: tight_layout squeezes the axes to fit the outside legend.
+fig.subplots_adjust(left=0.09, right=0.68, top=0.9, bottom=0.12)
+_scatter_stem = 'temporal_dependency_scatter_clarified' + ('_tablegini' if GINI_MODE == 'table' else '')
+plt.savefig(f'{out_path}/{_scatter_stem}.pdf', dpi=300, bbox_inches='tight')
+plt.savefig(f'{out_path}/{_scatter_stem}.png', dpi=200, bbox_inches='tight')
+print(f"Saved: {out_path}/{_scatter_stem}.pdf")
 plt.close()
 
 # Summary table
 
-print("\n" + "="*130)
+print()
 print("SUMMARY: Temporal Dependency Metrics")
-print("="*130)
-print(f"{'Task':<24} {'Unif.(1-Gini)':<14} {'Mean H/R':<10} {'Median H/R':<12} "
+print()
+print(f"{'Task':<24} {'Unif.(1-Gini)':<14} {'Table 1-Gini':<13} {'Mean H/R':<10} {'Median H/R':<12} "
       f"{'Sum H/R':<10} {'Hist.share%':<12} {'Peak t':<8} {'Peak/restMed':<13}")
 print("-"*130)
 for task in tasks_to_plot:
     m = task_metrics[task]
     print(f"{task_display_names[task]:<24} "
           f"{m['temporal_uniformity_gini']:<14.4f} "
+          f"{m['table_uniformity_gini']:<13.4f} "
           f"{m['mean_historical_vs_recent_ratio']:<10.4f} "
           f"{m['median_historical_vs_recent_ratio']:<12.4f} "
           f"{m['sum_historical_vs_recent_ratio']:<10.2f} "
           f"{m['pct_importance_from_history']:<12.1f} "
           f"{m['peak_timepoint']:<8d} "
           f"{m['peak_to_rest_ratio']:<13.2f}")
-print("="*130)
+print()
 
 # CSV export
 rows = []
@@ -332,19 +319,19 @@ for task in tasks_to_plot:
 pd.DataFrame(rows).to_csv(f'{out_path}/temporal_dependency_metrics_clarified.csv', index=False)
 print(f"\nSaved: {out_path}/temporal_dependency_metrics_clarified.csv")
 
-print("\nNOTE ON TIME AXIS: t=0 is the MOST RECENT measurement before the")
-print("prediction cutoff; t=19 is the EARLIEST/OLDEST (verified against")
-print("data_loaders_inf_risk_fixed.py -- dates are reverse-sorted).")
+print("\nTime axis: t=0 is the most recent measurement before the")
+print("prediction cutoff; t=19 is the earliest (dates are reverse-sorted in")
+print("data_loaders_inf_risk_fixed.py).")
 print("\nInterpretation:")
 print("  - Temporal Uniformity (1-Gini): whole-distribution equality across all 20 timepoints.")
-print("    * 1 = perfectly equal. Note: forgiving of a SINGLE outlier timepoint among 20 --")
-print("      check peak_to_rest_ratio too, don't read this number alone.")
+print("    * 1 = perfectly equal. Forgiving of a single outlier timepoint among 20;")
+print("      check peak_to_rest_ratio too.")
 print("  - Temporal Utilization (entropy): a second, independently-computed evenness measure.")
 print("  - Mean/Median Historical/Recent Ratio: per-timepoint MEAN/MEDIAN comparison of the 19")
-print("    historical timepoints (t=1-19) vs the single most recent one (t=0) -- NOT")
+print("    historical timepoints (t=1-19) vs the single most recent one (t=0), not")
 print("    historical-timepoints-summed vs recent.")
 print("    * ~1.0 = a typical historical timepoint matters about as much as the most recent one.")
-print("    * > 1.0 = history matters MORE than recency; < 1.0 = recency dominates.")
+print("    * > 1.0 = history matters more than recency; < 1.0 = recency dominates.")
 print("    * Median version is robust to the peak timepoint inflating the mean.")
 print("  - Peak timepoint / peak_to_rest_ratio: which single timepoint is most important, and")
 print("    how many times larger it is than the median of the other 19. peak_timepoint=0 means")
