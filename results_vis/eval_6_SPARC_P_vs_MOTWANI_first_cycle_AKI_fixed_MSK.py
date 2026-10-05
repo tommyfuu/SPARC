@@ -1,67 +1,9 @@
-"""SPARC-P vs the Motwani cisplatin-associated AKI (CP-AKI) nomogram, first
-course of cisplatin only.
+"""SPARC-P vs the Motwani cisplatin-AKI nomogram on the first cisplatin course.
 
-Comparators: `motwani_firstcycle`, the published 4-variable score on the first
-cisplatin course, mapped to a probability by the formula below; and
-`motwani_retrained`, logistic regression on the same features refit on
-train+val (a single model, not a 10-fold ensemble).
-
-Reference: Motwani SS, McMahon GM, Humphreys BD, Partridge AH, Waikar SS,
-Curhan GC. Development and Validation of a Risk Prediction Model for Acute
-Kidney Injury After the First Course of Cisplatin. J Clin Oncol.
-2018;36(7):682-688.
-
-Four pre-treatment predictors, with the point scheme assigned proportional to
-beta = ln(OR). Using the published ORs plus the paper's own score-to-
-probability anchors to fix the scale (~0.414 logit per point) reproduces its
-0-9.5 range. Reference levels (age<=60, dose<=100, no HTN, albumin>3.5) score 0:
-
-    age  61-70      1     (OR 1.64)
-    age  71-90      2.5   (OR 2.97)
-    dose 101-150    1     (OR 1.58)     first-course total mg
-    dose >150       3     (OR 3.73)
-    hypertension    2     (OR 2.10)     history of
-    albumin 2-3.5   2     (OR 2.21)     g/dL
-  >>> If you have the JCO Table 2 point column, verify these six numbers. <<<
-
-Baseline eGFR was not retained by the paper (not significant) and is
-deliberately excluded here too.
-
-Score to probability uses the paper's calibration -- baseline CP-AKI incidence
-0.04 at score 0, OR 1.49 per point, as used by Saito et al. 2025 for external
-validation:
-    odds0 = 0.04 / (1 - 0.04);  odds = odds0 * 1.49**score;  prob = odds/(1+odds)
-As a cross-check, ASCO's summary maps scores 0 / 3.5 / 8.5 to 0.03 / 0.12 /
-0.51; --prob_anchor=asco switches to the logit-linear map fit to those anchors.
-Ranking is invariant to which monotone map is used, so this only matters for
-calibration.
-
-Cohort matches the derivation: each patient's cycle-1 row, where cycle 1 is the
-earliest cisplatin-containing chemo day (see get_cycle1_*). Patients whose
-first cycle contains no cisplatin are dropped, with the count reported. Motwani
-did not exclude weekly cisplatin -- that was a FENCE restriction -- so
---exclude_weekly_cisplatin defaults to False here.
-
-Outcome is our next-infusion AKI label (event==1 & tte==1), NOT Motwani's
-literal "0.3 mg/dL rise within 14 days of first dose". This is a deliberate
-definitional deviation, surfaced in the console and the CSV notes; both models
-are scored on the same cycle-1 rows with the same labels.
-
-Data structures, verified against data/dataset_loading.py and the FENCE script:
-  * labs: data_dict_lab_dict['lab_def_dict'] = {DMP_ID: {date: [values]}}, raw
-    real units ordered by ALL_INCLUDED_TESTS. Albumin is read in g/dL, which
-    Motwani uses directly -- no x10 conversion, unlike the FENCE script.
-  * age: data_dict_lab_dict['age'] = {DMP_ID: [bin]}, 5-year bins, age ~ 5*bin
-  * hypertension: DMP_ID_to_hypertension_dates_delta_MSK_CAIA.pickle as
-    {DMP_ID: {delta_day: ['Essential hypertension', ...]}}. A key of -1 means
-    present before sequence start, so HTN at cycle 1 is any HTN day <= cycle-1
-    day and -1 always counts.
-  * cisplatin dose: DMP_ID_to_DATE_to_all_drugs_dict_enriched_{dataset}.pickle.
-    Per-day entries are dicts; the dose field name is auto-detected
-    (dose/dosage/amount/...) and the structure printed once for verification.
-    The first-course dose is the sum of cisplatin mg on the cycle-1 day(s).
-
-Output CSV: $SPARC_RESULTS_ROOT/eval_clinical_benchmarks
+Motwani et al., J Clin Oncol 2018;36(7):682-688. Points: age 61-70 = 1, 71-90 = 2.5;
+first-course dose 101-150 mg = 1, >150 mg = 3; hypertension = 2; albumin <=3.5 g/dL = 2.
+prob: odds = 0.04/0.96 * 1.49**score (--prob_anchor=asco: logit fit to 0/3.5/8.5 -> 0.03/0.12/0.51).
+Outcome is our next-infusion AKI label (event==1 & tte==1), not Motwani's 14-day creatinine rule.
 """
 
 import os
@@ -80,7 +22,7 @@ currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentfram
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir)
 
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -99,22 +41,15 @@ from MSK_featurename_list import (
     ALL_INCLUDED_TESTS,
     CREATININE_INDEX,
 )
-# Named indices into the raw lab_def_dict value vector (ordered by ALL_INCLUDED_TESTS)
+# index into lab_def_dict value vectors
 ALBUMIN_INDEX = ALL_INCLUDED_TESTS.index('Albumin')
 
-# Age bins are 5-year buckets (age_at_first_seq_binned_5); age ~ AGE_BIN_YEARS * bin
+# age is stored in 5-year bins
 AGE_BIN_YEARS = 5.0
 
-# Import DeLong test for significance testing
 from delong_test import delong_roc_test
 
-# Use torchmetrics for AUROC/AUPRC so the numbers are byte-identical to the
-# reference (eval_1_across_models_..._ensemble_FP_fixed.py), which computes them
-# with AUROC(task='binary') / AveragePrecision(task='binary'). sklearn's
-# roc_auc_score / average_precision_score differ from torchmetrics by ~1e-3 on
-# tied prediction scores, which is the entire residual gap vs the reference CSV.
-# We shadow the sklearn names with torchmetrics-backed wrappers of the same
-# signature so every existing call site is unchanged.
+# torchmetrics-backed AUROC/AUPRC to match eval_1 exactly (sklearn differs ~1e-3 on ties)
 from torchmetrics import AUROC as _TMAUROC, AveragePrecision as _TMAP
 _tm_auroc = _TMAUROC(task='binary')
 _tm_auprc = _TMAP(task='binary')
@@ -134,9 +69,7 @@ def average_precision_score(y_true, y_score):
     return _tm_auprc(ys, yt).item()
 
 
-# ============================  MOTWANI CP-AKI  ==============================
-# Four-variable score. Points below reproduce the paper's 0-9.5 range; verify
-# against JCO Table 2 if you have it.
+# Motwani CP-AKI score (range 0-9.5)
 MOTWANI_POINTS = {
     'age':     {'<=60': 0.0, '61-70': 1.0, '71-90': 2.5},
     'dose':    {'<=100': 0.0, '101-150': 1.0, '>150': 3.0},   # first-course cisplatin mg
@@ -144,13 +77,11 @@ MOTWANI_POINTS = {
     'albumin': {'>3.5': 0.0, '2.0-3.5': 2.0, '<2.0': 2.0},    # any hypoalbuminaemia band = 2
 }
 
-# Canonical score -> probability map (JCO / Saito 2025): incidence 0.04 at score 0,
-# OR 1.49 per point.
+# score -> prob (JCO / Saito 2025): incidence 0.04 at score 0, OR 1.49 per point
 MOTWANI_BASELINE_INCIDENCE = 0.04
 MOTWANI_OR_PER_POINT = 1.49
 
-# ASCO cross-check anchors: score 0/3.5/8.5 -> prob 0.03/0.12/0.51. A logit-linear
-# fit to the two extreme anchors gives intercept/slope in logit space.
+# ASCO anchors 0/3.5/8.5 -> 0.03/0.12/0.51; logit-linear fit through the end points
 _ASCO_S = np.array([0.0, 3.5, 8.5])
 _ASCO_P = np.array([0.03, 0.12, 0.51])
 _ASCO_LOGIT = np.log(_ASCO_P / (1 - _ASCO_P))
@@ -162,14 +93,12 @@ def motwani_prob_from_score(score, anchor='jco'):
     if anchor == 'asco':
         logit = _ASCO_INTERCEPT + _ASCO_SLOPE * score
         return float(1.0 / (1.0 + np.exp(-logit)))
-    # default 'jco'
     odds0 = MOTWANI_BASELINE_INCIDENCE / (1.0 - MOTWANI_BASELINE_INCIDENCE)
     odds = odds0 * (MOTWANI_OR_PER_POINT ** score)
     return float(odds / (1.0 + odds))
 
 
-# Risk stratification bands (Motwani reported score ranges; these mirror the
-# paper's low / medium / high / very-high grouping by total score).
+# risk groups by total score
 def motwani_risk_group(score):
     if score <= 1.0:
         return 'low'
@@ -181,7 +110,6 @@ def motwani_risk_group(score):
         return 'very_high'
 
 
-# Band helpers
 def age_band(age):
     if age is None:
         return '<=60'          # reference (0 pts) when unavailable
@@ -194,7 +122,7 @@ def age_band(age):
 
 def dose_band(dose_mg):
     if dose_mg is None:
-        return '<=100'         # reference (0 pts) when unavailable (documented)
+        return '<=100'         # reference (0 pts) when unavailable
     if dose_mg <= 100:
         return '<=100'
     if dose_mg <= 150:
@@ -203,9 +131,9 @@ def dose_band(dose_mg):
 
 
 def albumin_band(albumin_gdl):
-    """Motwani albumin in g/dL. >3.5 reference; 2.0-3.5 (and <2.0) = hypoalbuminaemia."""
+    """Albumin in g/dL; >3.5 is the reference band."""
     if albumin_gdl is None:
-        return '>3.5'          # reference (0 pts) when unavailable (documented)
+        return '>3.5'          # reference (0 pts) when unavailable
     if albumin_gdl > 3.5:
         return '>3.5'
     if albumin_gdl >= 2.0:
@@ -214,12 +142,7 @@ def albumin_band(albumin_gdl):
 
 
 def motwani_score_and_prob(feats, anchor='jco', include_dose=True):
-    """feats keys: age_band, dose_band, htn ('yes'/'no'), albumin_band.
-    include_dose=False -> 3-variable model (age + hypertension + albumin), used
-    when cisplatin dose is unavailable in the data source. The dose term is
-    dropped entirely (not scored as 0), so the score range and probability map
-    reflect a genuine 3-variable model rather than a 4-variable one pinned at the
-    dose reference level."""
+    """include_dose=False drops the dose term (3-variable model) when dose is unavailable."""
     P = MOTWANI_POINTS
     score = (P['age'][feats['age_band']]
              + P['htn'][feats['htn']]
@@ -231,33 +154,20 @@ def motwani_score_and_prob(feats, anchor='jco', include_dose=True):
 
 
 def build_motwani_feature_matrix(features_list, include_dose=True):
-    """Build feature matrix for logistic regression from Motwani feature dicts.
-
-    Returns: X (n_samples, n_features), feature_names list
-
-    Features are one-hot encoded categorical variables:
-    - age: <=60 (ref), 61-70, 71-90
-    - dose: <=100 (ref), 101-150, >150 mg (if include_dose=True)
-    - htn: no (ref), yes
-    - albumin: >3.5 (ref), 2.0-3.5, <2.0 g/dL
-    """
+    """One-hot Motwani bands (reference levels dropped) for the retrained LR."""
     X = []
     for feats in features_list:
         row = []
 
-        # Age: <=60 (ref), 61-70, 71-90
         row.append(1.0 if feats['age_band'] == '61-70' else 0.0)
         row.append(1.0 if feats['age_band'] == '71-90' else 0.0)
 
-        # Cisplatin dose: <=100 (ref), 101-150, >150 mg
         if include_dose:
             row.append(1.0 if feats['dose_band'] == '101-150' else 0.0)
             row.append(1.0 if feats['dose_band'] == '>150' else 0.0)
 
-        # Hypertension: no (ref), yes
         row.append(1.0 if feats['htn'] == 'yes' else 0.0)
 
-        # Albumin: >3.5 (ref), 2.0-3.5, <2.0 g/dL
         row.append(1.0 if feats['albumin_band'] == '2.0-3.5' else 0.0)
         row.append(1.0 if feats['albumin_band'] == '<2.0' else 0.0)
 
@@ -280,8 +190,7 @@ def build_motwani_feature_matrix(features_list, include_dose=True):
     return np.array(X), feature_names
 
 
-# Weekly-cisplatin detection (reused from the FENCE script; OFF by default here
-# because Motwani did not exclude weekly cisplatin).
+# weekly-cisplatin detection (from the FENCE script; off by default here)
 def is_weekly_cisplatin(drug_schedule, max_gap_days=10, min_runs=3):
     if not isinstance(drug_schedule, dict):
         return False
@@ -300,19 +209,16 @@ def is_weekly_cisplatin(drug_schedule, max_gap_days=10, min_runs=3):
     return False
 
 
-# ===============================  ARG PARSE  ================================
-# Roots for the argparse defaults below; each is overridable by env var or by
-# the corresponding CLI flag. Results go to results_vis_060726_batch_091426 so
-# runs here do not overwrite results_vis_060726; reference CSVs are still read
-# from the original tree.
+# args
+# roots can be overridden by env var or CLI flag
 SPARC_DATA_ROOT = os.environ.get(
     'SPARC_DATA_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_data')
 SPARC_MODEL_ROOT = os.environ.get(
-    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726')
+    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426')
 SPARC_RESULTS_ROOT = os.environ.get(
-    'SPARC_RESULTS_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726_batch_091426')
+    'SPARC_RESULTS_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426/results_vis_eval1_bfTrue')
 SPARC_REF_ROOT = os.environ.get(
-    'SPARC_REF_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726')
+    'SPARC_REF_ROOT', '/nonexistent/no_bf_false_reference_row')
 
 parser = argparse.ArgumentParser(prog='eval_SPARC_P_vs_MOTWANI_first_cycle_AKI')
 parser.add_argument("-r", "--rseed", type=int, default=1024)
@@ -328,9 +234,10 @@ parser.add_argument("-z", "--zeroshot", type=str, default='True')
 parser.add_argument("-mm", "--missing_mask", type=str, default="True")
 parser.add_argument("-en", "--ensemble", type=str, default='True')
 parser.add_argument("-dsp", "--data_source_path", type=str, default=f'{SPARC_DATA_ROOT}/')
-parser.add_argument("-mp", "--model_path", type=str, default=f'{SPARC_MODEL_ROOT}')
+parser.add_argument("-mp", "--model_path", type=str,
+                    default=os.environ.get('SPARC_EVAL7_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_MSK_sparcp_bfTrue_092926'))
 parser.add_argument("-rp", "--results_path", type=str,
-                    default=f'{SPARC_RESULTS_ROOT}/eval_clinical_benchmarks')
+                    default=f'{SPARC_RESULTS_ROOT}/eval7_comparators_MSK_bfTrue')
 parser.add_argument("--weekly_cisplatin_max_gap", type=int, default=10)
 parser.add_argument("--exclude_weekly_cisplatin", type=str, default='False',
                     help="Motwani did NOT exclude weekly cisplatin; default False.")
@@ -341,10 +248,6 @@ parser.add_argument("--prob_anchor", type=str, default='jco', choices=['jco', 'a
                     help="score->probability map. 'jco': incidence 0.04 @ score0, OR 1.49/pt "
                          "(default). 'asco': logit-linear fit to 0/3.5/8.5 -> 0.03/0.12/0.51.")
 parser.add_argument("--hypertension_path", type=str,
-                    # NOTE: this default was two adjacent string literals, which
-                    # Python silently concatenated into one impossible filename
-                    # ('...og_060525.pickleDMP_ID_to_hypertension...'). The second
-                    # name is the file that actually exists.
                     default=f'{SPARC_DATA_ROOT}/MSK/df_icd_og_060525.csv',
                     help="Hypertension source. .csv: the de-identified ICD billing "
                          "table (DMP_ID, DTE_SINCE_SEQ, CC_CLSF_CD), filtered to "
@@ -358,6 +261,10 @@ parser.add_argument("--existing_csv", type=str,
                     default=f'{SPARC_REF_ROOT}/'
                             'eval_across_models_valthresh_disabled/model_performance_dict_across_models_parsimonious_AKI_MSK_CAIA_ensemble.csv',
                     help="Path to existing CSV with all-cycle SPARC-P metrics (for reference)")
+parser.add_argument("-bf", "--batch_first", type=str, default='True',
+                    help="True | False -- build SPARC with batch_first=True so the encoder "
+                         "attends over time. MUST match how the checkpoints were trained; "
+                         "a mismatch loads silently.")
 args = parser.parse_args()
 
 rseed = args.rseed
@@ -378,9 +285,8 @@ hypertension_path = args.hypertension_path
 run_diagnostics = args.diagnostics.lower() == 'true'
 existing_csv_path = args.existing_csv
 
-# LOCKED settings for this analysis
-option = 'AKI'                           # AKI task
-add_num_infusion = True                  # required for cycle indexing
+option = 'AKI'
+add_num_infusion = True                  # needed for cycle indexing
 
 med_of_choice = [m.strip() for m in args.med_of_choice.split(',')]
 result_meds = []
@@ -392,8 +298,7 @@ for med_str in med_of_choice:
 med_of_choice = result_meds
 print("med_of_choice:", med_of_choice)
 
-# Architecture params (match 060726 training). AKI/anemia/neutropenia/FN all use
-# the 'hybrid' finetuned checkpoints and the G-CSF-free model input shape.
+# architecture params (match 060726 training)
 batch_size = 512
 model_include_gcsf = False
 use_module_tokenizer = True
@@ -402,11 +307,10 @@ post_mlp_dropout = 0.2
 use_sigmoid = True
 schedule_option = 'default'
 learning_rate = 1e-4
-include_gcsf = False   # AKI task does not need the G-CSF harvest
+include_gcsf = False
 
 component = 'parsimonious'
 
-# Load dataset
 print("Loading dataset ...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option=option, modules=modules,
@@ -419,7 +323,6 @@ print("Data loaded.")
 module_index_cfg = build_module_index_config(modular_featuredim_dict, advanced_model='default')
 n_static_features = module_index_cfg['n_static']
 
-# Load Motwani auxiliary data sources
 print("\nLoading Motwani auxiliary data ...")
 
 def _try_load_pickle(path, label):
@@ -432,17 +335,9 @@ def _try_load_pickle(path, label):
     return {}
 
 def _load_hypertension(path):
-    """Build {DMP_ID: {delta_day: [codes]}} of hypertension diagnoses.
+    """{DMP_ID: {delta_day: [codes]}} of hypertension diagnoses, from a pickle or the ICD csv.
 
-    Accepts either the pre-built pickle, or the raw ICD billing table
-    (df_icd_og_060525.csv: DMP_ID, DTE_SINCE_SEQ, CC_CLSF_CD), which is the
-    de-identified source the pickle was originally derived from.
-
-    Hypertension is matched on both code systems, since the MSK table is
-    predominantly ICD-9:
-        ICD-9   401-405  (401 essential, 402 hypertensive heart, 403 h. CKD,
-                          404 heart+CKD, 405 secondary)
-        ICD-10  I10-I16
+    Matches ICD-9 401-405 and ICD-10 I10-I16 (the MSK table is mostly ICD-9).
     """
     if not path or not os.path.exists(path):
         print(f"  [hypertension] NOT FOUND at {path} -> hypertension term disabled")
@@ -463,7 +358,7 @@ def _load_hypertension(path):
 
     out = _dd(lambda: _dd(list))
     n_rows = 0
-    # 471 MB file: stream it rather than loading whole.
+    # large file, read in chunks
     for chunk in _pd.read_csv(path, usecols=['DMP_ID', 'DTE_SINCE_SEQ', 'CC_CLSF_CD'],
                               chunksize=500_000, low_memory=False):
         hit = chunk[chunk['CC_CLSF_CD'].map(_is_htn)]
@@ -477,13 +372,9 @@ def _load_hypertension(path):
     return htn
 
 
-# MSK medication source: loaded by load_dataset into data_dict_lab_dict under
-# 'DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT', from
-#   postbc_DMP_ID_to_DATES_to_nonoral_drug_cats_wdosage_deidentified_061925.pickle
-# Structure: {DMP_ID: {date: [entry, ...]}} where each entry is a LIST:
-#   [0]=drug name, [1]=class, [2]=regimen, [3]=category, [4]=DOSE, [5]=unit,
-#   [6]=duration_days, [7]=day_offset, [8]=frequency
-# (Verified against the uploaded structure screenshot.)
+# MSK non-oral meds: {DMP_ID: {date: [entry, ...]}}, entry is a list:
+# [0] name, [1] class, [2] regimen, [3] category, [4] dose, [5] unit,
+# [6] duration_days, [7] day_offset, [8] frequency
 DRUG_NAME_IDX = 0
 DRUG_DOSE_IDX = 4
 DRUG_UNIT_IDX = 5
@@ -491,12 +382,9 @@ drugs_dict = data_dict_lab_dict.get('DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT', {})
 print(f"  [drugs] MSK non-oral meds (w/ dosage): {len(drugs_dict)} patients "
       f"from data_dict_lab_dict['DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT']")
 
-# Hypertension from the ICD table df_icd_og_060525.csv (I10-I16), built into a
-# date-keyed {DMP_ID: {delta_day: [codes]}} dict (same shape as the old pickle).
 htn_dict = _load_hypertension(hypertension_path)
 
-# Dose extraction now reads list-entry index [4] (dose) / [5] (unit) directly.
-# Print one cisplatin entry to verify structure + units at runtime.
+# print one cisplatin entry to check dose/unit positions
 def _first_cisplatin_entry():
     for pid, sched in drugs_dict.items():
         if not isinstance(sched, dict):
@@ -525,8 +413,7 @@ else:
     print("  [dose][WARN] no CISPLATIN entries found -> dose unavailable, "
           "Motwani reverts to 3-variable.")
 
-# If no usable dose exists, run Motwani as a 3-variable model (age + HTN +
-# albumin). MOTWANI_INCLUDE_DOSE was set above from the cisplatin-entry probe.
+# no usable dose -> 3-variable Motwani (age + HTN + albumin)
 MOTWANI_N_VARS = 4 if MOTWANI_INCLUDE_DOSE else 3
 if not MOTWANI_INCLUDE_DOSE:
     print("  [dose] Cisplatin dose unavailable in this data source -> running Motwani "
@@ -534,7 +421,7 @@ if not MOTWANI_INCLUDE_DOSE:
 
 
 def _coerce_mg(val):
-    """Coerce a dose value to float mg. Accepts numbers or strings like '100 mg'."""
+    """Dose as float; accepts numbers or strings like '100 mg'."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -543,7 +430,7 @@ def _coerce_mg(val):
     return float(m.group()) if m else None
 
 
-# Per-patient accessors (mirror the FENCE script's conventions).
+# per-patient accessors
 LAB_DEF = data_dict_lab_dict.get('lab_def_dict', {})
 if not LAB_DEF:
     print("[WARN] data_dict_lab_dict['lab_def_dict'] is empty; albumin will default to "
@@ -589,12 +476,12 @@ def _baseline_lab_value(dmp_id, test_index, cutoff_date=None, lookback=90):
 
 
 def get_albumin_gdl(dmp_id, cutoff_date=None):
-    # Motwani uses g/dL directly; MSK raw albumin is already g/dL -> no conversion.
+    # MSK albumin is already g/dL
     return _baseline_lab_value(dmp_id, ALBUMIN_INDEX, cutoff_date)
 
 
 def _htn_lookup(dmp_id):
-    """Tolerant int/str key lookup into the hypertension dict."""
+    """Lookup tolerant of int/str DMP_ID keys."""
     if dmp_id in htn_dict:
         return htn_dict[dmp_id]
     for alt in (str(dmp_id), _safe_int(dmp_id)):
@@ -611,8 +498,7 @@ def _safe_int(x):
 
 
 def get_hypertension(dmp_id, cutoff_date=None):
-    """'yes' if any hypertension diagnosis day <= cutoff_date. Key -1 = pre-existing
-    (always counts). If cutoff is None, any HTN record counts."""
+    """'yes' if any HTN diagnosis day <= cutoff_date; key -1 (pre-existing) always counts."""
     rec = _htn_lookup(dmp_id)
     if not rec:
         return 'no'
@@ -640,9 +526,7 @@ def _entry_name(e):
 
 
 def get_cycle1_day_and_drugs(dmp_id):
-    """Earliest CISPLATIN administration day, and the drug entries on that day.
-    For Motwani we anchor cycle 1 on the first cisplatin day directly (Motwani's
-    'first course of cisplatin'), since the MSK meds dict has no is_chemo flag."""
+    """First cisplatin day and that day's drug entries (cycle 1 = first cisplatin course)."""
     sched = drugs_dict.get(dmp_id)
     if not isinstance(sched, dict) or not sched:
         return None, []
@@ -659,9 +543,7 @@ def cycle1_has_cisplatin(cycle1_entries):
 
 
 def get_cycle1_cisplatin_dose_mg(cycle1_entries):
-    """Sum cisplatin dose (entry index [4]) on the cycle-1 day. Returns None if
-    dose unavailable or no cisplatin present. Assumes unit at [5] is mg (verified
-    from the sample print); if a non-mg unit appears, flag it."""
+    """Total cisplatin mg on the cycle-1 day, or None. Warns on non-mg units."""
     if not MOTWANI_INCLUDE_DOSE:
         return None
     total = 0.0
@@ -675,7 +557,6 @@ def get_cycle1_cisplatin_dose_mg(cycle1_entries):
                 continue
             if mg is not None:
                 if unit not in ('MG', 'MILLIGRAM', 'MILLIGRAMS', ''):
-                    # non-mg unit -> flag once; Motwani dose bands are in mg
                     print(f"    [dose][WARN] cisplatin unit is {unit!r}, not mg -- "
                           f"bands assume mg; verify conversion.")
                 total += mg
@@ -696,27 +577,27 @@ def build_motwani_features(dmp_id):
         'dose_band': dose_band(dose_mg),
         'htn': htn,
         'albumin_band': albumin_band(albumin),
-        # raw values kept for the audit dump
+        # raw values for the audit csv
         '_age': age, '_dose_mg': dose_mg, '_albumin_gdl': albumin,
         '_cycle1_day': c1_day, '_has_cisplatin_cycle1': has_cis,
     }
     return feats
 
 
-# Model folder (SPARC-P, AKI -> hybrid)
+# SPARC-P model folder
 all_model_path = model_path
 base_option = 'AKI'
-model_type_suffix = 'risk'   # AKI finetuned checkpoints use the 'risk' suffix (not 'hybrid')
+model_type_suffix = 'risk'   # AKI checkpoints use 'risk', not 'hybrid'
 
 if dataset == 'MSK':
-    # MSK-trained AKI checkpoints. Adjust the folder stem if your MSK models live
-    # elsewhere (this mirrors the CAIA layout with MSK substituted).
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_060726/SPARC_finetuned_models/'
                       f'{modules}_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 elif dataset in ['MSK_CAIA', 'MSK_CAIA_timeshift', 'stanfordEHRSHOT'] or (dataset == 'MIMICIV_hosp' and zeroshot):
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_CAIA_060726/SPARC_finetuned_models/'
                       f'{modules}_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 else:
+    if args.batch_first == 'True':
+        raise SystemExit("No batch_first=True MIMICIV_hosp-finetuned SPARC exists; the only MIMICIV-finetuned models are the published bf=False ones. Use -z True (zero-shot from the bf=True CAIA models) or run the published repo.")
     mimiciv_sparc_path = f'{SPARC_MODEL_ROOT}/parsimonious_MIMICIV_hosp_060726'
     sparc_p_folder = (f'{mimiciv_sparc_path}/SPARC_finetuned_models/'
                       f'parsimonious_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
@@ -725,11 +606,11 @@ if dataset == 'MSK' and not os.path.isdir(sparc_p_folder):
     print(f"[SPARC-P][WARN] MSK model folder not found at the guessed path above. "
           f"Set the correct MSK AKI checkpoint folder before running.")
 
-# Build split_dict / test set
+# test set
 if 'CAIA' in dataset:
     print(f"Using split_dict from load_dataset. Test size: {len(split_dict['test'])}")
 elif dataset == 'MSK':
-    # MSK test set = fold 10 of fold_dict_11 (matches the reference multi-model eval).
+    # MSK test set = fold 10 of fold_dict_11
     with open(f'{data_source_path}/MSK/fold_dict_11.pickle', 'rb') as h:
         fold_dict = pickle.load(h)
     tids = [d for d in fold_dict[10]
@@ -747,7 +628,7 @@ elif dataset == 'MIMICIV_hosp':
     tids = [d for d in fr['test'] if d in data_dict_lab_dict.get('basic_lab', data_dict_lab_dict.get('age', {})).keys()]
     split_dict = {'train': [], 'val': [], 'test': tids}
 
-# ---- Optional weekly-cisplatin exclusion (OFF by default for Motwani) ----
+# optional weekly-cisplatin exclusion
 if exclude_weekly_cisplatin and drugs_dict:
     before = len(split_dict['test'])
     excluded = set(d for d in split_dict['test']
@@ -758,12 +639,11 @@ if exclude_weekly_cisplatin and drugs_dict:
 else:
     print("\n[COHORT] Weekly-cisplatin exclusion OFF (Motwani did not exclude weekly cisplatin)")
 
-# option suffix / task
 model_set_option = 'side_effects_risk'
 option = f'{option}_risk'   # AKI_risk
 all_folds = list(range(10))
 
-# Precompute Motwani features + score for every test patient
+# Motwani score for every test patient
 print("\nComputing Motwani scores for test cohort ...")
 motwani_by_patient = {}
 n_no_cis_c1 = 0
@@ -776,7 +656,7 @@ for dmp_id in split_dict['test']:
     motwani_by_patient[dmp_id] = {'score': score, 'prob': prob,
                                   'group': motwani_risk_group(score), 'feats': feats}
 
-# Coverage diagnostics
+# coverage
 _n = len(motwani_by_patient)
 _dose_avail = sum(1 for v in motwani_by_patient.values() if v['feats']['_dose_mg'] is not None)
 _alb_avail = sum(1 for v in motwani_by_patient.values() if v['feats']['_albumin_gdl'] is not None)
@@ -792,7 +672,7 @@ if _dose_avail == 0:
     print("  [dose][WARN] No cisplatin doses parsed -> every dose defaults to the <=100 band "
           "(0 pts). Fix the dose field detection before trusting the comparison.")
 
-# SPARC-P inference (all cycles; we mask to cycle 1 for scoring)
+# SPARC-P inference on all cycles (masked to cycle 1 later)
 pl.seed_everything(rseed)
 anc_mode = True if 'CAIA' in dataset else False
 
@@ -802,7 +682,7 @@ data_module = FlexibleFeatureDataModule(
     task=option, binary_days=days, med=med_of_choice, med_as_feature=False, med_l=med_of_choice,
     advanced_model='default', control_lack_confounds=False, side_effect_censoring=False,
     include_infusion_dates=add_num_infusion, premed_only=False, competing_risk_death_check=False,
-    anc=anc_mode, test_shuffle=False)   # deterministic test-set order -> valid positional ensemble
+    anc=anc_mode, test_shuffle=False)   # fixed order, needed for the positional ensemble
 print("data module initiated (G-CSF-free, test_shuffle=False)")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -824,7 +704,8 @@ for val_fold in all_folds:
         module_index_cfg=module_index_cfg,
         use_module_tokenizer=use_module_tokenizer, use_continuous_time=use_continuous_time,
         n_static_features=n_static_features, post_mlp_dropout=post_mlp_dropout, lr=learning_rate,
-    ).to(device)
+    batch_first=(args.batch_first == 'True'),
+).to(device)
     model.eval()
 
     all_preds, all_events, all_ttes, all_infus, all_dmp = [], [], [], [], []
@@ -862,7 +743,7 @@ for val_fold in all_folds:
     all_infus = torch.cat(all_infus).numpy().ravel()
     all_dmp = np.array(all_dmp)
 
-    # OUR next-infusion AKI label on every row (event==1 & tte==1)
+    # next-infusion AKI label (event==1 & tte==1)
     row_label = ((all_events == 1) & (all_ttes == 1)).astype(int)
     sparc_fold_store[val_fold] = {
         'preds': all_preds, 'label': row_label, 'dmp': all_dmp, 'cycle': all_infus,
@@ -870,27 +751,18 @@ for val_fold in all_folds:
     print(f"fold {val_fold}: {len(all_preds)} rows, {int(row_label.sum())} next-inf AKI positives")
 
 
-# Build ensemble across folds -- POSITIONAL stacking, matching the reference
-# (eval_1_across_models_comparison_ensemble_FP_fixed.py):
-#   ensemble_preds = np.mean(fold_preds, axis=0); ensemble_events = fold_events[0]
-# Every fold iterates the IDENTICAL test set in the IDENTICAL order (same rseed,
-# same DataModule), so row i is the same (patient, cycle, window) across folds.
-# We therefore average predictions row-wise and take fold 0's labels / dmp / cycle
-# as canonical. (The previous (dmp,cycle)-dict approach silently dropped/overwrote
-# rows when a patient had >1 window at the same cycle index, desynchronizing preds
-# from labels and collapsing AUROC toward 0.5.)
+# Ensemble = row-wise mean across folds, as in eval_1. Folds see the same test rows
+# in the same order, so fold 0's labels/dmp/cycle are used. Don't key by (dmp, cycle):
+# a patient can have several windows at the same cycle.
 print("\nBuilding SPARC-P ensemble (positional row-wise mean across folds) ...")
 
-# Guard: every fold must have the same number of rows for positional stacking to
-# be valid. If not, the test-set ordering differs and the comparison is invalid.
+# positional stacking needs equal row counts and matching labels across folds
 fold_lens = {f: len(sparc_fold_store[f]['preds']) for f in all_folds}
 if len(set(fold_lens.values())) != 1:
     raise RuntimeError(f"Fold row counts differ {fold_lens}; positional ensemble "
                        f"stacking is invalid. Check that all folds share the same "
                        f"test set / ordering.")
 
-# Stronger guard: labels should be identical across folds (same test set). Verify
-# against fold 0 and warn loudly if not.
 ref = sparc_fold_store[0]
 for f in all_folds[1:]:
     if not np.array_equal(sparc_fold_store[f]['label'], ref['label']):
@@ -906,7 +778,7 @@ ens_cycle_all = ref['cycle'].astype(int)
 print(f"Ensemble rows: {len(ens_pred_all)}, positives: {int(ens_label_all.sum())}")
 
 
-# First-cycle mask + Motwani probability per row
+# first-cycle mask + Motwani prob per row
 first_idx = int(ens_cycle_all.min())
 fc_mask = (ens_cycle_all == first_idx)
 
@@ -914,7 +786,7 @@ motwani_prob_rows = np.array([
     motwani_by_patient.get(d, {}).get('prob', np.nan) for d in ens_dmp_all
 ])
 
-# Restrict to patients whose first cycle actually contained cisplatin (Motwani cohort)
+# Motwani cohort: first cycle contains cisplatin
 if require_cisplatin_cycle1:
     has_cis_row = np.array([
         bool(motwani_by_patient.get(d, {}).get('feats', {}).get('_has_cisplatin_cycle1', False))
@@ -923,10 +795,9 @@ if require_cisplatin_cycle1:
     motwani_prob_rows = np.where(has_cis_row, motwani_prob_rows, np.nan)
 
 
-# Train MOTWANI_retrained logistic regression model (train+val combined)
+# Motwani_retrained: LR on the same features, fit on train+val
 print("\n=== Training MOTWANI_retrained logistic regression model (train+val combined) ===")
 
-# Load train+val data
 _, _, split_dict_trainval, _, _ = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option=option,
     modules=modules, valfold=0, mode='train', rseed=rseed,
@@ -934,11 +805,9 @@ _, _, split_dict_trainval, _, _ = load_dataset(
     data_fraction_option='default', quick_test=False, caia_portion=caia_portion,
 )
 
-# Get both train and val patient IDs
 train_val_ids = list(split_dict_trainval['train']) + list(split_dict_trainval['val'])
 print(f"Combined train+val: {len(train_val_ids)} patients")
 
-# Exclude weekly cisplatin if needed
 if exclude_weekly_cisplatin:
     before = len(train_val_ids)
     excluded_train = [d for d in train_val_ids
@@ -946,14 +815,12 @@ if exclude_weekly_cisplatin:
     train_val_ids = [d for d in train_val_ids if d not in set(excluded_train)]
     print(f"  Weekly-cisplatin exclusion: removed {before - len(train_val_ids)}")
 
-# Create combined split_dict
 split_dict_combined = {
     'train': train_val_ids,
     'val': [],
     'test': split_dict_trainval['test']
 }
 
-# Create data module for combined train+val
 data_module_combined = FlexibleFeatureDataModule(
     data_dict_lab_dict, split_dict_combined, dataset=dataset, component=component,
     batch_size=batch_size, max_time_len=20, num_workers=1,
@@ -962,14 +829,14 @@ data_module_combined = FlexibleFeatureDataModule(
     include_infusion_dates=add_num_infusion, premed_only=False, competing_risk_death_check=False,
     anc=anc_mode, test_shuffle=False)
 
-# Extract first-cycle features and labels from train+val
+# first-cycle features/labels from train+val
 train_features_list = []
 train_labels = []
 train_seen_patients = set()
 
 print("Extracting first-cycle features from train+val patients...")
 
-# First pass: find global first cycle index
+# pass 1: global first cycle index
 all_num_inf_train = []
 for batch in data_module_combined.train_dataloader():
     try:
@@ -983,21 +850,19 @@ for batch in data_module_combined.train_dataloader():
 train_first_idx = int(np.min(all_num_inf_train)) if all_num_inf_train else 0
 print(f"  Train first cycle index: {train_first_idx}")
 
-# Second pass: extract first-cycle features
+# pass 2: one first-cycle row per patient
 for batch in data_module_combined.train_dataloader():
     try:
         (xs, times, num_infusion, dmp_ids), y = batch
     except:
         continue
 
-    # Extract labels
     if isinstance(y, (list, tuple)) and len(y) >= 2:
         fail = y[0]
         tte = y[1]
     else:
         continue
 
-    # Convert to numpy
     if isinstance(fail, torch.Tensor):
         fail = fail.cpu().numpy()
     else:
@@ -1018,15 +883,11 @@ for batch in data_module_combined.train_dataloader():
     elif not isinstance(dmp_ids, (list, tuple)):
         dmp_ids = list(dmp_ids)
 
-    # For each sample in batch
     for i in range(len(dmp_ids)):
         dmp_id = dmp_ids[i]
-        # Only use first cycle and only once per patient
         if num_infusion[i] == train_first_idx and dmp_id not in train_seen_patients:
-            # Build Motwani features for this training patient
             feats = build_motwani_features(dmp_id)
 
-            # Check if this patient has cisplatin in cycle 1 (if required)
             if require_cisplatin_cycle1:
                 if not feats.get('_has_cisplatin_cycle1', False):
                     continue
@@ -1034,17 +895,14 @@ for batch in data_module_combined.train_dataloader():
             train_seen_patients.add(dmp_id)
             train_features_list.append(feats)
 
-            # Label: next-infusion AKI (event==1 & tte==1)
             label = 1 if (fail[i] == 1 and tte[i] == 1) else 0
             train_labels.append(label)
 
-# Build feature matrix
 X_train, feature_names = build_motwani_feature_matrix(train_features_list, include_dose=MOTWANI_INCLUDE_DOSE)
 y_train = np.array(train_labels)
 
 print(f"Training samples: {len(y_train)} unique patients, {int(y_train.sum())} positives ({y_train.sum()/len(y_train) if len(y_train) > 0 else 0:.2%})")
 
-# Fit logistic regression
 if len(y_train) > 0 and len(np.unique(y_train)) == 2:
     print("Fitting logistic regression model...")
     lr_model = LogisticRegression(random_state=rseed, max_iter=1000, class_weight='balanced', solver='lbfgs')
@@ -1055,16 +913,12 @@ if len(y_train) > 0 and len(np.unique(y_train)) == 2:
     for fname, coef in zip(feature_names, lr_model.coef_[0]):
         print(f"  {fname:20s}: {coef:7.4f}")
 
-    # Compute predictions for test set (first cycle only)
-    # Get unique first-cycle test patients who have Motwani features
+    # predict on unique first-cycle test patients (same cisplatin filter as Motwani)
     fc_dmps_at_test = ens_dmp_all[fc_mask]
-    # Deduplicate to get unique patients (some may have multiple windows at first cycle)
-    # Apply same filters as original Motwani (cisplatin requirement if specified)
     fc_test_dmp_unique = []
     seen = set()
     for d in fc_dmps_at_test:
         if d not in seen and d in motwani_by_patient:
-            # Apply cisplatin filter if required (matching original Motwani)
             if require_cisplatin_cycle1:
                 if not motwani_by_patient[d]['feats'].get('_has_cisplatin_cycle1', False):
                     continue
@@ -1075,20 +929,16 @@ if len(y_train) > 0 and len(np.unique(y_train)) == 2:
     X_test, _ = build_motwani_feature_matrix(test_features_list, include_dose=MOTWANI_INCLUDE_DOSE)
     motwani_retrained_probs_test = lr_model.predict_proba(X_test)[:, 1]
 
-    # Create dict for easy lookup
     patient_to_pred = {fc_test_dmp_unique[i]: motwani_retrained_probs_test[i]
                        for i in range(len(fc_test_dmp_unique))}
 
-    # Create full array aligned with ens_dmp_all for easier indexing
+    # broadcast back to every first-cycle row of that patient
     motwani_retrained_prob_rows = np.full(len(ens_dmp_all), np.nan)
-    # Map predictions to ALL first-cycle rows (including duplicates for same patient)
-    # Only set predictions for patients who passed the filters
     fc_indices = np.where(fc_mask)[0]
     fc_dmps = ens_dmp_all[fc_mask]
 
     for i, d in enumerate(fc_dmps):
         if d in patient_to_pred:
-            # Set prediction for this first-cycle row
             motwani_retrained_prob_rows[fc_indices[i]] = patient_to_pred[d]
 
     print(f"\nMOTWANI_retrained predictions computed for {len(fc_test_dmp_unique)} unique test patients "
@@ -1099,12 +949,9 @@ else:
     motwani_retrained_prob_rows = np.full(len(ens_dmp_all), np.nan)
 
 
-# Comparison harness (SPARC-P vs Motwani on the same cycle-1 rows)
+# SPARC-P vs comparator on the same cycle-1 rows
 def _bootstrap_ci(y, p, metric='auroc', n_boot=1000, seed=1024):
-    # Use SKLEARN inside the bootstrap loop -- torchmetrics is ~20-50x slower per
-    # call and its global metric objects accumulate state across calls (making the
-    # 1000-iteration loop crawl / appear hung). CIs are intervals, so they don't
-    # need the decimal-exact torchmetrics match that the point estimates use.
+    # sklearn here: torchmetrics is far slower in a 1000x loop, and CIs don't need the exact match
     from sklearn.metrics import roc_auc_score as _sk_auroc, average_precision_score as _sk_auprc
     rng = np.random.default_rng(seed)
     vals = []
@@ -1123,22 +970,18 @@ def _bootstrap_ci(y, p, metric='auroc', n_boot=1000, seed=1024):
 
 
 def valid_infusion_mask(labels, cycles):
-    """Replicates the reference's 'auroc_next_infusion_overall' row selection:
-    keep only rows whose CYCLE has both a positive and a negative next-infusion
-    label. Cycles that are all-negative (or all-positive) are dropped, exactly as
-    valid_infusions_auroc does in calculate_weighted_c_index_by_infusion."""
+    """Rows whose cycle has both classes (the eval_1 'overall' row selection)."""
     keep = np.zeros(len(labels), dtype=bool)
     for c in np.unique(cycles):
         m = cycles == c
         s = labels[m].sum()
-        if s > 0 and s < m.sum():   # has both classes
+        if s > 0 and s < m.sum():
             keep |= m
     return keep
 
 
 def _overall_auroc_auprc(preds, labels, cycles):
-    """AUROC/AUPRC over valid-infusion rows only == reference 'overall' metric
-    (test_auroc_nextinf_overall / test_auprc_nextinf_overall)."""
+    """AUROC/AUPRC over valid-infusion rows (test_auroc_nextinf_overall)."""
     keep = valid_infusion_mask(labels, cycles)
     y, p = labels[keep], preds[keep]
     if len(np.unique(y)) < 2:
@@ -1147,17 +990,13 @@ def _overall_auroc_auprc(preds, labels, cycles):
 
 
 def _weighted_auroc_auprc(preds, labels, cycles):
-    """Per-cycle AUROC/AUPRC averaged, weighted by each valid cycle's sample count.
-    Replicates the reference 'weighted' metric (test_auroc_nextinf_weighted /
-    test_auprc_nextinf_weighted): for every infusion cycle that has both a positive
-    and a negative, compute that cycle's AUROC/AUPRC on its own rows, then take a
-    sample-size-weighted mean across those cycles."""
+    """Per-cycle AUROC/AUPRC, mean weighted by cycle size (test_auroc_nextinf_weighted)."""
     per = []
     for c in np.unique(cycles):
         m = cycles == c
         y, p = labels[m], preds[m]
         s = y.sum()
-        if 0 < s < m.sum():                       # valid infusion (both classes)
+        if 0 < s < m.sum():
             per.append({
                 'auroc': roc_auc_score(y, p),
                 'auprc': average_precision_score(y, p),
@@ -1195,7 +1034,7 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     ce_auroc = roc_auc_score(y, cp); ce_auprc = average_precision_score(y, cp)
     ce_a_ci = _bootstrap_ci(y, cp, 'auroc'); ce_p_ci = _bootstrap_ci(y, cp, 'auprc')
 
-    # DeLong test for comparing AUROCs
+    # DeLong test on paired AUROCs
     try:
         delong_result = delong_roc_test(y, sp, cp)
         delong_pvalue = delong_result['pvalue']
@@ -1216,21 +1055,17 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     rows.append({'comparison': tag, 'model': comparator_name, 'n': n, 'n_pos': npos,
                  'auroc': ce_auroc, 'auroc_ci_lower': ce_a_ci[0], 'auroc_ci_upper': ce_a_ci[1],
                  'auprc': ce_auprc, 'auprc_ci_lower': ce_p_ci[0], 'auprc_ci_upper': ce_p_ci[1]})
-    # Add significance test result row
+    # significance row: p-value in auroc, z in auroc_ci_lower, AUROC diff in auroc_ci_upper
     rows.append({'comparison': f'{tag}_significance_test',
                  'model': f'SPARC-P_vs_{comparator_name}',
                  'n': n, 'n_pos': npos,
-                 'auroc': delong_pvalue,  # Store p-value in auroc column for convenience
-                 'auroc_ci_lower': delong_z,  # Store z-score in ci_lower column
-                 'auroc_ci_upper': sp_auroc - ce_auroc,  # Store AUROC difference
+                 'auroc': delong_pvalue,
+                 'auroc_ci_lower': delong_z,
+                 'auroc_ci_upper': sp_auroc - ce_auroc,
                  'auprc': None, 'auprc_ci_lower': None, 'auprc_ci_upper': None})
 
 
-# DIAGNOSTIC: SPARC-P AUROC/AUPRC across ALL cycles (its native setting) and a
-# per-infusion label breakdown, so cycle indexing and the general (non-first-
-# cycle) performance can be verified. This is SPARC-P ONLY (no Motwani, which is
-# a first-course model and does not apply beyond cycle 1).
-# Skipped entirely when --diagnostics False (baseline-only run).
+# Diagnostics: SPARC-P only, across all cycles (Motwani is first-course only)
 if run_diagnostics:
     print("\n############### SPARC-P ALL-CYCLES DIAGNOSTIC ###############")
     print(f"[DIAG] per-infusion label / count breakdown (ensemble rows):")
@@ -1241,10 +1076,7 @@ if run_diagnostics:
         n = int(m.sum())
         print(f"[DIAG] {iv:>6.0f} {n:>7} {npos:>7} {(npos/n if n else 0):>9.2%}")
 
-    # REFERENCE-MATCHING metric: 'auroc_next_infusion_overall' pools ONLY rows whose
-    # cycle has both a positive and a negative next-infusion label (valid infusions).
-    # This is what eval_1_across_models_..._ensemble_FP_fixed.py reports as the SPARC-P
-    # AUROC, so it's the number to compare against.
+    # overall metric as reported by eval_1 (valid-infusion rows only)
     ov_auroc, ov_auprc, ov_n, ov_pos = _overall_auroc_auprc(ens_pred_all, ens_label_all, ens_cycle_all)
     if not np.isnan(ov_auroc):
         keep = valid_infusion_mask(ens_label_all, ens_cycle_all)
@@ -1266,7 +1098,7 @@ if run_diagnostics:
     else:
         print("[DIAG] no valid-infusion rows; cannot compute reference-matching overall AUROC.")
 
-    # WEIGHTED metric (test_auroc_nextinf_weighted): per-cycle AUROC, sample-weighted.
+    # weighted metric (test_auroc_nextinf_weighted)
     w_auroc, w_auprc, w_ncyc, w_n = _weighted_auroc_auprc(ens_pred_all, ens_label_all, ens_cycle_all)
     if not np.isnan(w_auroc):
         print(f"[DIAG] SPARC-P WEIGHTED (per-cycle, sample-weighted, MATCHES reference "
@@ -1278,8 +1110,7 @@ if run_diagnostics:
     else:
         print("[DIAG] no valid-infusion cycles; cannot compute weighted AUROC.")
 
-    # NAIVE all-rows AUROC/AUPRC (every row, incl. all-negative cycles) -- kept for
-    # contrast; this is NOT what the reference reports and will differ slightly.
+    # naive all-rows AUROC, for contrast only (not what eval_1 reports)
     _y_all = ens_label_all
     _sp_all = ens_pred_all
     if len(np.unique(_y_all)) >= 2:
@@ -1294,8 +1125,7 @@ if run_diagnostics:
     else:
         print("[DIAG] all-rows subset is single-class; cannot compute AUROC.")
 
-    # SPARC-P AUROC excluding the first cycle (cycles >= first_idx+1), to isolate how
-    # much of the signal comes from later cycles with temporal context.
+    # later cycles only
     _later = ens_cycle_all > first_idx
     if _later.sum() > 0 and len(np.unique(ens_label_all[_later])) >= 2:
         y_l, sp_l = ens_label_all[_later], ens_pred_all[_later]
@@ -1318,12 +1148,11 @@ _motwani_label = 'Motwani' if MOTWANI_INCLUDE_DOSE else 'Motwani_3var'
 _run_comparison(f'MOTWANI_firstcycle (cycle=={first_idx})', fc_mask,
                 motwani_prob_rows, _motwani_label)
 
-# MOTWANI_retrained comparison
 _motwani_retrained_label = 'Motwani_retrained' if MOTWANI_INCLUDE_DOSE else 'Motwani_retrained_3var'
 _run_comparison(f'MOTWANI_retrained_firstcycle (cycle=={first_idx})', fc_mask,
                 motwani_retrained_prob_rows, _motwani_retrained_label)
 
-# per-fold SPARC-P transparency rows (first-cycle counts)
+# per-fold first-cycle counts
 for f in all_folds:
     s = sparc_fold_store[f]
     fc = (s['cycle'] == first_idx)
@@ -1331,7 +1160,7 @@ for f in all_folds:
                  'n': int(fc.sum()), 'n_pos': int(s['label'][fc].sum()),
                  'auroc': None, 'auprc': None})
 
-# note row documenting the outcome deviation + prob anchor + model variable count
+# settings row
 rows.append({'comparison': 'NOTE', 'model':
              f'outcome=OUR_next_infusion_AKI (not Motwani 14d rule); '
              f'prob_anchor={prob_anchor}; require_cisplatin_cycle1={require_cisplatin_cycle1}; '
@@ -1341,7 +1170,6 @@ rows.append({'comparison': 'NOTE', 'model':
                 ' (3-VARIABLE: cisplatin dose unavailable in data source, dose term dropped)'),
              'n': None, 'n_pos': None, 'auroc': None, 'auprc': None})
 
-# Save
 _wc = '_exclWeeklyCis' if exclude_weekly_cisplatin else ''
 save_name = (f'{results_path}/SPARC-P_vs_MOTWANI_firstcycle_FIXED_'
              f'{modules}_{dataset}_{caia_portion}_{prob_anchor}{_wc}.csv')
@@ -1351,7 +1179,7 @@ df.to_csv(save_name, index=False)
 print(f"\nSaved comparison to: {save_name}")
 print(df.to_string(index=False))
 
-# Per-patient Motwani audit
+# per-patient Motwani audit
 audit_rows = []
 seen = set()
 for d in ens_dmp_all:

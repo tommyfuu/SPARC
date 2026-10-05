@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""
-Forest plot: clinical-benchmark vs retrained vs SPARC-P across 4 MSK tasks
-(AKI, Anemia, Febrile neutropenia, Neutropenia).
-
-Reads point estimates + 95% CIs DIRECTLY from each benchmark script's output CSV
-(the *_MSK_*.csv files), so the figure always reflects the latest runs. Falls back
-to the hardcoded DATA block only if a CSV is missing -- and those fallback numbers
-are PLACEHOLDERS marked TODO, NOT real results.
-
-Which comparison row is plotted per task is controlled by COMPARISON_TAG (default
-the patient-level ever-positive comparison, the primary head-to-head).
+"""AUROC bar/forest plot: published clinical score vs retrained vs SPARC-P on 4 MSK
+tasks (AKI, anemia, febrile neutropenia, neutropenia), read from the eval_6 CSVs.
+--sparc_first puts SPARC on top of each task, then retrained, then published (files get _sparcfirst).
 """
 import os
 import glob
@@ -21,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import matplotlib.ticker as mticker
 
-# --- Global style ------------------------------------------------------------
+# style
 plt.rcParams.update({
     'font.family': 'sans-serif',
     'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
@@ -30,30 +22,19 @@ plt.rcParams.update({
     'axes.edgecolor': '#333333', 'axes.linewidth': 0.9,
     'xtick.color': '#333333', 'ytick.color': '#333333', 'text.color': '#333333',
 })
-# Palette taken from PROFESSIONAL_COLORS in
-# vis_eval_1_across_tasks_t1e_controlled_bar_060826_horizontal_succinct_wilcoxon_all.py
-# so the two figures read as one set. SPARC-P ranks first there, so it is
-# assigned index 0 (#2C5F8D); keep that fixed here regardless of ordering.
-COL_SPARC     = '#2C5F8D'   # deep blue   -- SPARC ensemble (matches grid figure)
-COL_ORIGINAL  = '#E07A5F'   # terracotta  -- published benchmark
-COL_RETRAINED = '#81B29A'   # sage green  -- benchmark refit on our data
+# palette from PROFESSIONAL_COLORS in the vis_eval_1 across-tasks bar figure
+COL_SPARC     = '#2C5F8D'   # SPARC ensemble
+COL_ORIGINAL  = '#E07A5F'   # published benchmark
+COL_RETRAINED = '#81B29A'   # benchmark refit on our data
 COL_REF, COL_SIG = '#CFCFCF', '#555555'
-# retained for any legacy reference
 COL_BLUE, COL_SALMON, COL_RED, COL_GRAY = COL_RETRAINED, COL_ORIGINAL, COL_SPARC, COL_ORIGINAL
 
-# Where to read results from, per task. Point each task at its benchmark CSV and
-# name the three model rows (original comparator label, retrained label, SPARC).
-# The labels must match the 'model' column values written by each eval script.
-# Where the benchmark CSVs live. Defaults to the batch tree the eval scripts
-# now write to; point --results_dir at results_vis_060726/eval_clinical_benchmarks
-# to plot the older run instead.
 _DEFAULT_MODEL_ROOT = os.environ.get(
     'SPARC_MODEL_ROOT',
     '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726')
-_DEFAULT_RESULTS_DIR = os.path.join(
-    os.environ.get('SPARC_RESULTS_ROOT',
-                   f'{_DEFAULT_MODEL_ROOT}/results_vis_060726_batch_091426'),
-    'eval_clinical_benchmarks')
+_DEFAULT_RESULTS_DIR = os.environ.get(
+    'SPARC_EVAL7_RESULTS_DIR',
+    '/data1/morrisq/fuc/SPARC_CAIA_092426/results_vis_eval1_bfTrue/eval7_comparators_MSK_bfTrue')
 
 _ap = argparse.ArgumentParser(
     description='Forest plot of SPARC-P vs published clinical risk scores.')
@@ -67,7 +48,14 @@ _ap.add_argument('--allow-placeholder', action='store_true',
                       'missing. OFF by default: the placeholders are copied from '
                       'the old CAIA figure and are NOT real MSK results, so a '
                       'silent fallback would publish fabricated values.')
+_ap.add_argument('--sparc_first', action='store_true',
+                 help='Within each task: SPARC, then retrained, then original benchmark; '
+                      'adds _sparcfirst to the filenames')
 _args = _ap.parse_args()
+if _args.sparc_first:
+    # solid black axis lines and ticks
+    plt.rcParams.update({'axes.edgecolor': 'black', 'xtick.color': 'black',
+                         'ytick.color': 'black', 'axes.linewidth': 1.0})
 
 RESULTS_DIR = _args.results_dir
 SAVE_DIR = _args.save_dir or RESULTS_DIR
@@ -76,8 +64,8 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 print(f"Reading benchmark CSVs from: {RESULTS_DIR}")
 print(f"Writing figure to          : {SAVE_DIR}")
 
-# The comparison block to plot (the primary head-to-head). Each eval writes rows
-# tagged by 'comparison'; the patient-level ever-positive one is the fair primary.
+# Per task: CSV glob, 'comparison' tag to plot, and 'model' labels as written by
+# each eval script (a list means alternatives, e.g. 7- vs 8-variable runs).
 TASK_CONFIG = {
     'AKI': {
         'glob': 'SPARC-P_vs_MOTWANI_*.csv',
@@ -98,10 +86,9 @@ TASK_CONFIG = {
         'pretty': 'Dranitsaris, et al.',
     },
     'Febrile neutropenia': {
-        # Real MSK FENCE (first-cycle). This CSV has NO 'comparison' column -- rows
-        # are keyed by model only, with the '_firstcycle' suffix.
+        # FENCE CSV has no 'comparison' column; rows keyed by model only
         'glob': 'SPARC-P_vs_FENCE_*.csv',
-        'comparison': None,   # no comparison column in this file
+        'comparison': None,
         'orig_label': 'FENCE_firstcycle',
         'ret_label':  'FENCE_retrained_firstcycle',
         'ret_comparison': None,
@@ -120,18 +107,14 @@ TASK_CONFIG = {
 }
 tasks = ['AKI', 'Anemia', 'Febrile neutropenia', 'Neutropenia']
 
-# Bars start here rather than at 0: AUROC below chance is not meaningful and a
-# 0-anchored bar would compress all the signal into the right-hand third. Note
-# that a lower CI bound below XMIN is clipped at the axis floor.
+# axis floor; CI bounds below it are clipped
 XMIN = 0.40
-# Right edge of the axes. Significance markers sit in a fixed column just
-# inside it rather than floating after each CI, matching the all-models grid.
-XMAX = 1.02
+# significance markers sit in a fixed column at the right edge
+XMAX = 1.0 if _args.sparc_first else 1.02   # --sparc_first: axis ends at 100%
 SIG_X = XMAX - 0.02
 
-# PLACEHOLDER fallback data (used only if a CSV is missing). TODO: these are NOT
-# real MSK results -- they are copied from the old CAIA figure so the plot renders.
-# Replace by running the eval scripts so the CSVs exist, or edit these in by hand.
+# Placeholder numbers copied from the old CAIA figure -- not MSK results.
+# Only used with --allow-placeholder when a CSV is missing.
 PLACEHOLDER = {
     'AKI': [
         {'name': 'Motwani, et al.',           'auroc': 0.545, 'lo': 0.466, 'hi': 0.630, 'n': 521, 'ev': 43},
@@ -156,30 +139,10 @@ PLACEHOLDER = {
 }
 
 
-def _row_from_csv(df, comparison, model_label):
-    """Extract auroc/lo/hi/n/ev for one (comparison, model) row."""
-    sub = df[df['model'] == model_label]
-    if comparison is not None:
-        sub = sub[sub['comparison'] == comparison]
-    sub = sub[pd.notna(sub['auroc'])]
-    if len(sub) == 0:
-        return None
-    r = sub.iloc[0]
-    return {
-        'auroc': float(r['auroc']),
-        'lo': float(r['auroc_ci_lower']) if pd.notna(r.get('auroc_ci_lower')) else float(r['auroc']),
-        'hi': float(r['auroc_ci_upper']) if pd.notna(r.get('auroc_ci_upper')) else float(r['auroc']),
-        'n':  int(r['n']) if pd.notna(r.get('n')) else None,
-        'ev': int(r['n_pos']) if pd.notna(r.get('n_pos')) else None,
-    }
-
-
 def load_task(task):
     """Load the three rows for a task from its CSV; fall back to PLACEHOLDER."""
     cfg = TASK_CONFIG[task]
-    # Match on a stem: the eval scripts encode run options in the filename
-    # (7var/8var, allcancer/allbreast, MSK/MSK_CAIA), which would otherwise
-    # break an exact-name lookup every time an option changes.
+    # glob on a stem: run options are encoded in the filenames
     matches = sorted(glob.glob(os.path.join(RESULTS_DIR, cfg['glob'])))
     matches = [m for m in matches if 'patient_audit' not in os.path.basename(m)]
     if not matches:
@@ -199,8 +162,7 @@ def load_task(task):
     path = matches[-1]
     print(f"[{task}] reading {os.path.basename(path)}")
     df = pd.read_csv(path)
-    # Defensive: the CSV must have 'model' and 'auroc'. 'comparison' may be absent
-    # in older-schema files -> treat as a single unnamed comparison.
+    # 'comparison' may be absent in older files
     if 'model' not in df.columns or 'auroc' not in df.columns:
         print(f"[{task}] CSV missing 'model'/'auroc' columns "
               f"(has {list(df.columns)}) -> PLACEHOLDER.")
@@ -220,8 +182,7 @@ def load_task(task):
     sparc_label = cfg.get('sparc_label', 'SPARC-P_ensemble')
 
     def _row(label, c):
-        # label may be a list of alternatives: the 7-variable run writes
-        # 'Dranitsaris_4var' while the 8-variable run writes 'Dranitsaris'.
+        # label may be a list of alternatives
         labels = label if isinstance(label, (list, tuple)) else [label]
         sub = df[df['model'].isin(labels)]
         if has_comp and c is not None:
@@ -247,16 +208,16 @@ def load_task(task):
             continue
         rec['name'] = pretty
         rows_out.append(rec)
+    if _args.sparc_first:
+        rows_out = rows_out[::-1]
     if len(rows_out) < 3:
         print(f"[{task}] fewer than 3 rows found -> using PLACEHOLDER. "
               f"(available models: {sorted(df['model'].dropna().unique().tolist())[:12]})")
         return PLACEHOLDER[task], False, None
 
-    # ---- auto-parse DeLong significance. In the *_significance_test rows the
-    # p-value is stored in the 'auroc' column; model col = 'SPARC-P_vs_<label>'. ----
+    # DeLong p-values: *_significance_test rows store p in 'auroc', model = 'SPARC-P_vs_<label>'
     def _pval_for(label, comp):
-        # try several candidate significance-row model labels (schemas differ).
-        # label may be a list of alternatives (see _row).
+        # try each candidate label
         labels = label if isinstance(label, (list, tuple)) else [label]
         candidates = []
         for lab in labels:
@@ -287,8 +248,7 @@ def load_task(task):
     return rows_out, True, _sig
 
 
-# significance markers: manual fallback, OVERRIDDEN per task by auto-parsed
-# DeLong p-values from the CSV *_significance_test rows when available.
+# fallback markers; replaced by CSV DeLong p-values when present
 significance = {
     'AKI':                 {'orig': 'ns',  'ret': 'ns'},
     'Anemia':              {'orig': 'ns',  'ret': 'ns'},
@@ -296,7 +256,7 @@ significance = {
     'Neutropenia':         {'orig': 'ns',  'ret': 'ns'},
 }
 
-# --- assemble data -----------------------------------------------------------
+# assemble data
 data, is_real = {}, {}
 for task in tasks:
     data[task], is_real[task], _autosig = load_task(task)
@@ -312,9 +272,7 @@ def style_for(name):
     return COL_ORIGINAL, 'o', 6
 
 
-# --- Layout: grouped horizontal bars (one group per task, three bars each) ---
-# Matches the all-models grid figure: horizontal bars with error bars, models
-# stacked within a task group on the y-axis.
+# grouped horizontal bars, one group per task
 fig, ax = plt.subplots(figsize=(9, 8.5))
 BAR_H, ROW_GAP, TASK_GAP = 0.52, 0.62, 1.25
 y_pos_all, tick_pos, tick_lab = [], [], []
@@ -330,8 +288,7 @@ for ti, task in enumerate(tasks):
         task_ys.append(yy); y_pos_all.append(yy)
         color, _marker, _ms = style_for(row['name'])
 
-        # Bar from the axis floor to the point estimate, with the CI as the
-        # error bar. xerr must be non-negative distances, not absolute bounds.
+        # xerr takes distances from the estimate, not absolute bounds
         lo, hi, est = row['lo'], row['hi'], row['auroc']
         xerr = [[max(0.0, est - lo)], [max(0.0, hi - est)]]
         ax.barh(yy, est - XMIN, left=XMIN, height=BAR_H, color=color,
@@ -361,7 +318,7 @@ ax.set_xlabel('AUROC (%)', fontsize=12)
 ax.set_xlim(XMIN, XMAX)
 ax.set_ylim(min(y_pos_all) - 0.5, max(y_pos_all) + 0.5)
 ax.set_xticks([0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-# AUROC is stored as a fraction throughout; only the tick labels are percentages.
+# AUROC stays a fraction; only tick labels are percentages
 ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
 ax.grid(axis='x', linestyle='--', linewidth=0.5, alpha=0.3, zorder=0)
 ax.spines['top'].set_visible(False)
@@ -375,8 +332,9 @@ legend_elems = [
     Patch(facecolor=COL_RETRAINED, edgecolor='black', linewidth=0.9, label='Retrained benchmark'),
     Patch(facecolor=COL_SPARC,     edgecolor='black', linewidth=0.9, label='SPARC ensemble'),
 ]
-# Below the axes rather than inside: the top-left corner is occupied by the
-# AKI bars, and a horizontal strip under the x-label keeps the plot area clean.
+if _args.sparc_first:
+    legend_elems = legend_elems[::-1]
+# legend below the axes
 ax.legend(handles=legend_elems, loc='upper center', bbox_to_anchor=(0.5, -0.065),
           ncol=3, fontsize=9, frameon=False, handlelength=1.4, columnspacing=2.0)
 ax.set_title('Clinical benchmark comparison (MSK)', fontsize=13, pad=12, loc='left')
@@ -386,8 +344,9 @@ ax.text(0.5, -0.115,
         transform=ax.transAxes, ha='center', fontsize=8, color=COL_SIG)
 plt.tight_layout()
 
-out_png = os.path.join(SAVE_DIR, 'clinical_benchmark_forest_plot_MSK.png')
-out_pdf = os.path.join(SAVE_DIR, 'clinical_benchmark_forest_plot_MSK.pdf')
+_sfx = '_sparcfirst' if _args.sparc_first else ''
+out_png = os.path.join(SAVE_DIR, f'clinical_benchmark_forest_plot_MSK{_sfx}.png')
+out_pdf = os.path.join(SAVE_DIR, f'clinical_benchmark_forest_plot_MSK{_sfx}.pdf')
 plt.savefig(out_png, dpi=300, bbox_inches='tight')
 plt.savefig(out_pdf, bbox_inches='tight')
 print('saved', out_png, 'and', out_pdf)

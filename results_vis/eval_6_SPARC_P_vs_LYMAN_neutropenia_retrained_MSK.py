@@ -1,38 +1,10 @@
-"""SPARC-P vs the Lyman neutropenic-complications risk model.
+"""SPARC-P vs the Lyman neutropenic-complications model (Lyman_published and
+Lyman_retrained = LR on Lyman's features refit on train+val), first-cycle and
+patient-level ever-positive.
 
-SPARC-P n / n_pos / metrics come from the existing across-models CSV
-(--existing_csv) to avoid re-running inference; first-cycle and patient-level
-results are regenerated here.
-
-Two comparators:
-  * Lyman_retrained (PRIMARY, report this one): logistic regression on Lyman's
-    available feature set, refit on our train+val. Needs no published
-    coefficients, so it is a fair test of whether those features carry signal
-    in our cohort.
-  * Lyman_published (SECONDARY): the published-style additive score, but
-    LYMAN_BETA currently holds PLACEHOLDER coefficients -- Cancer 2011 Table 3
-    is not yet encoded, so its ranking is not faithful. Do not report it until
-    the real weights are inserted.
-
-Reference: Lyman GH, Kuderer NM, Crawford J, et al. Predicting individual risk
-of neutropenic complications in patients receiving cancer chemotherapy. Cancer.
-2011;117(9):1917-1927. doi:10.1002/cncr.25691
-
-Features: age, WBC, AST, ALP, bilirubin and CKD-EPI GFR are active. Prior
-chemotherapy, immunosuppressive drug use, chemotherapy agent type and cancer
-type are placeholder-inert -- their accessors return 0 until wired. Planned RDI
-is dropped, since it needs actual and standard dose and is not reconstructable.
-
-Lyman's endpoint is a cycle-1 composite of severe neutropenia (ANC<500) or
-febrile neutropenia (ANC<1000 with fever). We score against our neutropenia
-next-infusion label (event==1 & tte==1), so this is an endpoint-definition
-deviation -- confirm the grade alignment. Being a first-cycle model, the
-primary comparison is patient-level ever-positive plus first-cycle. Lyman's
-pan-cancer prospective cohort (breast/lung/CRC/ovary/lymphoma) makes this
-external validation with reasonably aligned cohort type.
-
-prob = sigmoid(linear predictor); the intercept is omitted in the published
-variant and fit in the retrained one. Either way AUROC is invariant to it.
+Lyman GH et al. Cancer. 2011;117(9):1917-1927 (Table 3). prob = sigmoid(lp),
+lp = intercept + sum(ln(OR) * x). Planned RDI is dropped (no dose data).
+Outcome is our next-infusion neutropenia label, not Lyman's cycle-1 SN/FN composite.
 """
 import os
 import pickle
@@ -77,10 +49,9 @@ CREAT_INDEX = ALL_INCLUDED_TESTS.index('Creatinine')
 
 AGE_BIN_YEARS = 5.0
 
-# Import DeLong test for significance testing
 from delong_test import delong_roc_test
 
-# torchmetrics for AUROC/AUPRC (parity with reference eval)
+# torchmetrics AUROC/AUPRC to match the eval_1 reference numbers
 from torchmetrics import AUROC as _TMAUROC, AveragePrecision as _TMAP
 _tm_auroc = _TMAUROC(task='binary')
 _tm_auprc = _TMAP(task='binary')
@@ -98,15 +69,8 @@ def average_precision_score(y_true, y_score):
     return _tm_auprc(ys, yt).item()
 
 
-# ============================  LYMAN NEUTROPENIA  ==========================
-# The PUBLISHED Lyman model's exact point weights (Cancer 2011 Table 3) are not
-# encoded -- LYMAN_BETA below is PLACEHOLDER (used only for the 'Lyman_published'
-# comparator, whose ranking is therefore NOT faithful). The PRIMARY Lyman
-# comparator here is 'Lyman_retrained': a logistic regression using Lyman's
-# FEATURE SET but refit on our own train+val data, which needs no published
-# coefficients from the actual model. This is now the FAITHFUL published Lyman
-# comparator (Cancer 2011 Table 3), with the reported intercept -> calibrated.
-# beta = ln(OR).
+# Lyman neutropenia model
+# Published coefficients, Cancer 2011 Table 3; beta = ln(OR).
 LYMAN_INTERCEPT = -3.423
 LYMAN_BETA = {
     # binary indicators
@@ -116,7 +80,7 @@ LYMAN_BETA = {
     'alp_gt120':   np.log(1.469),   # +0.385  (ALP > 120 U/L)
     'tbil_gt1':    np.log(2.152),   # +0.766  (bilirubin > 1 mg/dL)
     'immunosupp':  np.log(1.554),   # +0.441
-    'planned_rdi': np.log(2.018),   # +0.702  (planned RDI >=85%) -- UNAVAILABLE (dropped)
+    'planned_rdi': np.log(2.018),   # +0.702  (planned RDI >=85%); unused, no dose data
     # continuous (per unit)
     'gfr':         np.log(0.993),   # -0.00702 per mL/min
     'wbc':         np.log(0.930),   # -0.07257 per 10^3/mm^3
@@ -135,13 +99,12 @@ LYMAN_BETA = {
     'chemo_gemcitabine':      np.log(3.092),    # +1.129
     'chemo_topoisomerase_I':  np.log(18.579),   # +2.922
     'chemo_vinorelbine':      np.log(4.218),    # +1.439
-    # CSF prophylaxis (strong protective)
+    # CSF prophylaxis
     'csf_prophylaxis':        np.log(0.120),    # -2.120
 }
 
-# Which optional terms are actually available in this dataset (set at load time):
-LYMAN_HAS_RDI = False   # planned RDI unavailable (no dose data) -> term dropped
-LYMAN_HAS_CSF = False   # set True if a G-CSF-prophylaxis source loads
+LYMAN_HAS_RDI = False   # no dose data
+LYMAN_HAS_CSF = False   # set after gcsf_dict loads
 
 
 def _sigmoid(x):
@@ -149,7 +112,7 @@ def _sigmoid(x):
 
 
 def compute_egfr_ckd_epi(creat_mgdl, age, is_female):
-    """CKD-EPI 2009 eGFR (mL/min/1.73m^2); identical to the FENCE accessor."""
+    """CKD-EPI 2009 eGFR (mL/min/1.73m^2), same as the FENCE script."""
     if creat_mgdl is None or age is None or creat_mgdl <= 0:
         return None
     if is_female:
@@ -161,11 +124,8 @@ def compute_egfr_ckd_epi(creat_mgdl, age, is_female):
 
 
 def lyman_features_to_lp(feats):
-    """Faithful published-Lyman linear predictor (Table 3 betas + intercept).
-    Continuous GFR/WBC enter as raw value * beta. Binary thresholds AST>35,
-    ALP>120, bili>1. Cancer type vs colorectum. Chemo classes each an indicator.
-    Missing continuous -> that term contributes 0. planned RDI dropped (no data).
-    CSF prophylaxis included only if available."""
+    """Published Lyman linear predictor. GFR/WBC enter as value * beta; missing
+    values contribute 0."""
     B = LYMAN_BETA
     lp = LYMAN_INTERCEPT
     if feats['age'] is not None and feats['age'] >= 65:
@@ -186,16 +146,14 @@ def lyman_features_to_lp(feats):
         lp += B['gfr'] * feats['egfr']
     if feats['wbc'] is not None:
         lp += B['wbc'] * feats['wbc']
-    # cancer type (colorectum = reference, contributes 0)
+    # colorectum is the reference
     ct = feats.get('cancer_lyman')
     if ct in ('sclc', 'nsclc', 'ovary', 'breast', 'lymphoma'):
         lp += B[f'cancer_{ct}']
-    # chemo classes (union over cycle-1 drugs)
     for cls in (feats.get('chemo_classes') or set()):
         key = f'chemo_{cls}'
         if key in B:
             lp += B[key]
-    # CSF prophylaxis
     if LYMAN_HAS_CSF and feats.get('csf_prophylaxis'):
         lp += B['csf_prophylaxis']
     return lp
@@ -206,14 +164,10 @@ def lyman_score_and_prob(feats):
     return lp, _sigmoid(lp)
 
 
-# Wired accessors. prior_chemo and immunosuppressive use are populated from real
-# sources (globals MED_DICT / CHEMO_NAMES / steroid_dict, loaded below before any
-# call). index_day = the patient's first treatment day (min med day); "prior" and
-# the steroid window are measured relative to it. chemo_type / cancer_type remain
-# inert placeholders.
+# Accessors below use globals MED_DICT / CHEMO_NAMES / steroid_dict loaded later.
+# Index day = first med day; "prior" and the steroid window are relative to it.
 def _patient_index_day(dmp_id):
-    """First (earliest) medication-administration day for the patient = index day
-    of the treatment course. None if no meds."""
+    """Earliest medication day (index day), or None."""
     sched = MED_DICT.get(dmp_id)
     if not isinstance(sched, dict) or not sched:
         return None
@@ -222,10 +176,8 @@ def _patient_index_day(dmp_id):
 
 
 def get_prior_chemo(dmp_id, cutoff_date=None):
-    """True if the patient received any chemotherapy agent (per LLM classification)
-    on a day STRICTLY BEFORE the index day. Approximates Lyman's 'prior
-    chemotherapy' within the available med record (undercounts chemo predating the
-    record; documented)."""
+    """Any chemo agent strictly before the index day. Undercounts chemo that
+    predates the med record."""
     if not LYMAN_WIRE_PRIOR_CHEMO:
         return False
     sched = MED_DICT.get(dmp_id)
@@ -236,7 +188,7 @@ def get_prior_chemo(dmp_id, cutoff_date=None):
         return False
     for day, entries in sched.items():
         di = _safe_int(day)
-        if di is None or di >= idx:      # strictly before index
+        if di is None or di >= idx:
             continue
         for e in entries:
             try:
@@ -249,10 +201,8 @@ def get_prior_chemo(dmp_id, cutoff_date=None):
 
 
 def get_immunosuppressive_use(dmp_id, cutoff_date=None):
-    """True if a steroid was administered within Lyman's window before the index
-    day: day in [index - steroid_window_hi, index - steroid_window_lo]. This
-    excludes single-dose peri-chemo antiemetic premedication (which would make the
-    flag near-constant). Set --steroid_window_hi huge to count ANY prior steroid."""
+    """Steroid in [index - steroid_window_hi, index - steroid_window_lo]; the gap
+    skips antiemetic premedication, which would make the flag near-constant."""
     if not LYMAN_WIRE_IMMUNOSUPP:
         return False
     rec = steroid_dict.get(dmp_id)
@@ -262,10 +212,10 @@ def get_immunosuppressive_use(dmp_id, cutoff_date=None):
         return False
     idx = _patient_index_day(dmp_id)
     if idx is None:
-        # no med record -> fall back to any steroid before day 0
+        # no med record: any steroid before day 0
         return any(_safe_int(d) is not None and int(d) < 0 for d in rec.keys())
-    lo = idx - steroid_window_hi     # earlier bound
-    hi = idx - steroid_window_lo     # later bound (closer to index)
+    lo = idx - steroid_window_hi
+    hi = idx - steroid_window_lo
     for day in rec.keys():
         di = _safe_int(day)
         if di is not None and lo <= di <= hi:
@@ -273,21 +223,10 @@ def get_immunosuppressive_use(dmp_id, cutoff_date=None):
     return False
 
 
-def get_chemo_type_highrisk(dmp_id, cutoff_date=None):
-    return False   # still inert placeholder
-
-
-def get_cancer_type_highrisk(dmp_id, cutoff_date=None):
-    return False   # still inert placeholder
-
-
 def build_feature_matrix(features_list, include_placeholders=True):
-    """Feature matrix for the retrained logistic regression, using Lyman's full
-    available feature set: continuous age/wbc/ast/alp/tbil/egfr, Lyman-threshold
-    abnormality flags (AST>35, ALP>120, bili>1), prior_chemo, immunosupp, cancer
-    buckets, chemo-class indicators, and CSF prophylaxis. RDI dropped (no data).
-    Returns X, feature_names."""
-    _CANCER = ['sclc', 'nsclc', 'ovary', 'breast', 'lymphoma']  # colorectum=ref
+    """Lyman features for the retrained LR: continuous labs/age, Lyman threshold
+    flags, and (include_placeholders) categorical terms. Returns X, feature_names."""
+    _CANCER = ['sclc', 'nsclc', 'ovary', 'breast', 'lymphoma']  # colorectum = ref
     _CHEMO = _LYMAN_CLS_KEYS
     X = []
     for feats in features_list:
@@ -298,7 +237,7 @@ def build_feature_matrix(features_list, include_placeholders=True):
         row.append(feats['alp'] if feats['alp'] is not None else 0.0)
         row.append(feats['tbil'] if feats['tbil'] is not None else 0.0)
         row.append(feats['egfr'] if feats['egfr'] is not None else 0.0)
-        # Lyman-threshold abnormality flags
+        # Lyman threshold flags
         row.append(1.0 if (feats['age'] is not None and feats['age'] >= 65) else 0.0)
         row.append(1.0 if (feats['ast'] is not None and feats['ast'] > 35) else 0.0)
         row.append(1.0 if (feats['alp'] is not None and feats['alp'] > 120) else 0.0)
@@ -306,15 +245,12 @@ def build_feature_matrix(features_list, include_placeholders=True):
         if include_placeholders:
             row.append(1.0 if feats.get('prior_chemo') else 0.0)
             row.append(1.0 if feats.get('immunosupp') else 0.0)
-            # cancer buckets (colorectum ref dropped)
             ct = feats.get('cancer_lyman')
             for c in _CANCER:
                 row.append(1.0 if ct == c else 0.0)
-            # chemo class indicators
             cc = feats.get('chemo_classes') or set()
             for c in _CHEMO:
                 row.append(1.0 if c in cc else 0.0)
-            # CSF prophylaxis
             row.append(1.0 if feats.get('csf_prophylaxis') else 0.0)
         X.append(row)
     feature_names = ['age', 'wbc', 'ast', 'alp', 'tbil', 'egfr',
@@ -327,19 +263,16 @@ def build_feature_matrix(features_list, include_placeholders=True):
     return np.array(X), feature_names
 
 
-# ===============================  ARG PARSE  ================================
-# Roots for the argparse defaults below; each is overridable by env var or by
-# the corresponding CLI flag. Results go to results_vis_060726_batch_091426 so
-# runs here do not overwrite results_vis_060726; reference CSVs are still read
-# from the original tree.
+# args
+# Default roots; each can be overridden by env var or CLI flag.
 SPARC_DATA_ROOT = os.environ.get(
     'SPARC_DATA_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_data')
 SPARC_MODEL_ROOT = os.environ.get(
-    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726')
+    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426')
 SPARC_RESULTS_ROOT = os.environ.get(
-    'SPARC_RESULTS_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726_batch_091426')
+    'SPARC_RESULTS_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426/results_vis_eval1_bfTrue')
 SPARC_REF_ROOT = os.environ.get(
-    'SPARC_REF_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726')
+    'SPARC_REF_ROOT', '/nonexistent/no_bf_false_reference_row')
 
 parser = argparse.ArgumentParser(prog='eval_SPARC_P_vs_LYMAN_neutropenia_retrained')
 parser.add_argument("-r", "--rseed", type=int, default=1024)
@@ -355,9 +288,10 @@ parser.add_argument("-z", "--zeroshot", type=str, default='True')
 parser.add_argument("-mm", "--missing_mask", type=str, default="True")
 parser.add_argument("-en", "--ensemble", type=str, default='True')
 parser.add_argument("-dsp", "--data_source_path", type=str, default=f'{SPARC_DATA_ROOT}/')
-parser.add_argument("-mp", "--model_path", type=str, default=f'{SPARC_MODEL_ROOT}')
+parser.add_argument("-mp", "--model_path", type=str,   # bf=True MSK SPARC-P
+                    default=os.environ.get('SPARC_EVAL7_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_MSK_sparcp_bfTrue_092926'))
 parser.add_argument("-rp", "--results_path", type=str,
-                    default=f'{SPARC_RESULTS_ROOT}/eval_clinical_benchmarks')
+                    default=f'{SPARC_RESULTS_ROOT}/eval7_comparators_MSK_bfTrue')
 parser.add_argument("--existing_csv", type=str,
                     default=f'{SPARC_REF_ROOT}/'
                             'eval_across_models_valthresh_disabled/model_performance_dict_across_models_parsimonious_neutropenia_MSK_ensemble.csv')
@@ -379,6 +313,10 @@ parser.add_argument("--steroid_window_lo", type=int, default=14,
 parser.add_argument("--steroid_window_hi", type=int, default=90,
                     help="Lyman immunosuppressive window upper bound (days before index). "
                          "Set --steroid_window_hi very large (e.g. 100000) to count ANY prior steroid.")
+parser.add_argument("-bf", "--batch_first", type=str, default='True',
+                    help="True | False -- build SPARC with batch_first=True so the encoder "
+                         "attends over time. MUST match how the checkpoints were trained; "
+                         "a mismatch loads silently.")
 args = parser.parse_args()
 
 rseed = args.rseed
@@ -401,7 +339,7 @@ steroid_path = args.steroid_path
 steroid_window_lo = args.steroid_window_lo
 steroid_window_hi = args.steroid_window_hi
 
-# LOCKED settings
+# Fixed for this analysis
 option = 'neutropenia'
 add_num_infusion = True
 
@@ -415,7 +353,7 @@ for med_str in med_of_choice:
 med_of_choice = result_meds
 print("med_of_choice:", med_of_choice)
 
-# Architecture params (neutropenia uses 'hybrid' finetuned checkpoints)
+# Architecture params (must match training)
 batch_size = 512
 model_include_gcsf = False
 use_module_tokenizer = True
@@ -427,7 +365,7 @@ learning_rate = 1e-4
 include_gcsf = False
 component = 'parsimonious'
 
-# Load existing CSV to get n and n_pos
+# Optional all-cycles SPARC-P reference row from the across-models CSV
 print(f"\nLoading existing CSV (optional) from: {existing_csv_path}")
 HAVE_EXISTING_CSV = os.path.exists(existing_csv_path)
 if HAVE_EXISTING_CSV:
@@ -471,7 +409,6 @@ print("Data loaded.")
 module_index_cfg = build_module_index_config(modular_featuredim_dict, advanced_model='default')
 n_static_features = module_index_cfg['n_static']
 
-# Lyman term summary
 print("\n[LYMAN] active terms: age, WBC, AST, ALP, bilirubin, GFR")
 print("[LYMAN] WIRED terms: prior_chemo (med dict + LLM classification), "
       "immunosupp (steroid dict, windowed), chemo classes (LLM), cancer type, CSF prophylaxis. DROPPED: planned RDI (no dose data)")
@@ -489,17 +426,16 @@ def _try_load_pickle(path, label):
     print(f"  [{label}] NOT FOUND at {path} -> will default")
     return {}
 
-# Sources for the two now-wired categorical predictors:
-#   * prior chemo: med dict (loaded by load_dataset) + LLM med classification
-#   * immunosuppressive use: dated steroid dict (Lyman's window applied)
+# Sources: med dict + LLM chemo classes (prior chemo, chemo type), steroid dict
+# (immunosuppression), demographics (cancer type), gcsf_dict (CSF prophylaxis).
 print("\n[LYMAN] loading prior-chemo + immunosuppressive + class/cancer/CSF sources ...")
 MED_DICT = data_dict_lab_dict.get('DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT', {})
 print(f"  [meds] {len(MED_DICT)} patients in DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT")
 
-# Lyman per-drug chemo-class multilabel dict: {MED(upper): {anthracyclines:bool,...}}
+# {MED(upper): {anthracyclines: bool, ...}}
 lyman_chemo_cls = _try_load_pickle(lyman_chemo_class_path, 'lyman_chemo_class')
 lyman_chemo_cls = {str(k).strip().upper(): v for k, v in lyman_chemo_cls.items()}
-# any Lyman class True (or the immunosuppressive flag) => it's a chemo/relevant drug
+# a med counts as chemo if any Lyman class is True
 _LYMAN_CLS_KEYS = ['anthracyclines', 'platinum', 'taxanes', 'alkylating',
                    'topoisomerase_II', 'gemcitabine', 'topoisomerase_I', 'vinorelbine']
 CHEMO_NAMES = {name for name, c in lyman_chemo_cls.items()
@@ -508,7 +444,6 @@ print(f"  [lyman_chemo_class] {len(lyman_chemo_cls)} meds, {len(CHEMO_NAMES)} wi
 
 steroid_dict = _try_load_pickle(steroid_path, 'steroid')
 
-# Cancer type (demographic csv) -> Lyman buckets
 import pandas as _pd
 CTYPE_DICT = {}
 if os.path.exists(demographic_path):
@@ -519,7 +454,6 @@ if os.path.exists(demographic_path):
 else:
     print(f"  [cancer_type] demographic CSV not found at {demographic_path} -> cancer term = reference")
 
-# CSF prophylaxis from gcsf_dict (strong protective term, OR 0.12)
 GCSF_DICT = data_dict_lab_dict.get('gcsf_dict', {})
 LYMAN_HAS_CSF = len(GCSF_DICT) > 0
 print(f"  [csf] gcsf_dict: {len(GCSF_DICT)} patients -> CSF prophylaxis term "
@@ -612,12 +546,8 @@ def _entry_name(e):
 
 
 def get_lyman_chemo_classes(dmp_id):
-    """Union of Lyman chemo classes over the cycle-1 (index-day) drugs, with
-    dedup rules that respect Lyman's category intent:
-      * platinum takes precedence over alkylating (cisplatin/carbo -> platinum only)
-      * anthracyclines takes precedence over topoisomerase_II (doxorubicin ->
-        anthracyclines only)
-    Returns a set of Lyman class names present."""
+    """Set of Lyman chemo classes over index-day drugs. Platinum overrides
+    alkylating and anthracyclines overrides topoisomerase_II for the same drug."""
     sched = MED_DICT.get(dmp_id)
     if not isinstance(sched, dict) or not sched:
         return set()
@@ -632,7 +562,6 @@ def get_lyman_chemo_classes(dmp_id):
         if not isinstance(c, dict):
             continue
         present = {k for k in _LYMAN_CLS_KEYS if c.get(k)}
-        # dedup rules
         if 'platinum' in present and 'alkylating' in present:
             present.discard('alkylating')
         if 'anthracyclines' in present and 'topoisomerase_II' in present:
@@ -641,7 +570,7 @@ def get_lyman_chemo_classes(dmp_id):
     return classes
 
 
-# Lyman cancer-type buckets (reference = colorectum). Map primary_cancer_type_th.
+# primary_cancer_type_th -> Lyman bucket (colorectum = reference)
 _LYMAN_CANCER_MAP = {
     'Small Cell Lung Cancer': 'sclc',
     'Non-Small Cell Lung Cancer': 'nsclc',
@@ -649,13 +578,13 @@ _LYMAN_CANCER_MAP = {
     'Breast Cancer': 'breast',
     'Mature B-Cell Neoplasms': 'lymphoma',
     'Mature T and NK Neoplasms': 'lymphoma',
-    'Colorectal Cancer': 'colorectum',   # reference (contributes 0)
+    'Colorectal Cancer': 'colorectum',
     'Appendiceal Cancer': 'colorectum',
 }
 
 
 def get_lyman_cancer(dmp_id):
-    """Map to Lyman's cancer buckets; unknown/other -> 'colorectum' reference (0)."""
+    """Lyman cancer bucket; unknown/other falls back to the colorectum reference."""
     ct = CTYPE_DICT.get(dmp_id)
     if ct is None:
         return 'colorectum'
@@ -663,8 +592,7 @@ def get_lyman_cancer(dmp_id):
 
 
 def get_csf_prophylaxis(dmp_id, index_day=None):
-    """True if prophylactic G-CSF given around cycle 1 (before/at the index day),
-    from gcsf_dict. Structure tolerant: {DMP_ID: {day: ...}} or {DMP_ID: [days]}."""
+    """G-CSF within +/-3 days of the index day. gcsf_dict values may be dicts or day lists."""
     if not LYMAN_HAS_CSF:
         return False
     rec = _lookup_flexible(GCSF_DICT, dmp_id)
@@ -676,7 +604,6 @@ def get_csf_prophylaxis(dmp_id, index_day=None):
         di = _safe_int(d)
         if di is None:
             continue
-        # prophylaxis ~ given on/around the index cycle (within +/- a few days of idx)
         if idx is None or (idx - 3) <= di <= (idx + 3):
             return True
     return False
@@ -698,18 +625,18 @@ def build_lyman_features(dmp_id, cutoff_date=None):
         'egfr': egfr,
         'prior_chemo':   get_prior_chemo(dmp_id, cutoff_date),
         'immunosupp':    get_immunosuppressive_use(dmp_id, cutoff_date),
-        'chemo_classes': get_lyman_chemo_classes(dmp_id),     # set of Lyman classes
-        'cancer_lyman':  get_lyman_cancer(dmp_id),            # Lyman cancer bucket
+        'chemo_classes': get_lyman_chemo_classes(dmp_id),
+        'cancer_lyman':  get_lyman_cancer(dmp_id),
         'csf_prophylaxis': get_csf_prophylaxis(dmp_id, idx),
-        'planned_rdi':   False,   # unavailable (no dose data)
+        'planned_rdi':   False,   # no dose data
         '_creat': creat, '_cutoff': cutoff_date,
     }
 
 
-# Model folder (SPARC-P, neutropenia -> hybrid)
+# SPARC-P model folder
 all_model_path = model_path
 base_option = 'neutropenia'
-model_type_suffix = 'hybrid'   # anemia/neutropenia/FN use 'hybrid' finetuned checkpoints
+model_type_suffix = 'hybrid'   # anemia/neutropenia/FN checkpoints
 
 if dataset == 'MSK':
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_060726/SPARC_finetuned_models/'
@@ -718,12 +645,14 @@ elif dataset in ['MSK_CAIA', 'MSK_CAIA_timeshift', 'stanfordEHRSHOT'] or (datase
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_CAIA_060726/SPARC_finetuned_models/'
                       f'{modules}_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 else:
+    if args.batch_first == 'True':
+        raise SystemExit("No batch_first=True MIMICIV_hosp-finetuned SPARC exists; the only MIMICIV-finetuned models are the published bf=False ones. Use -z True (zero-shot from the bf=True CAIA models) or run the published repo.")
     mimiciv_sparc_path = f'{SPARC_MODEL_ROOT}/parsimonious_MIMICIV_hosp_060726'
     sparc_p_folder = (f'{mimiciv_sparc_path}/SPARC_finetuned_models/'
                       f'parsimonious_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 print("SPARC-P folder:", sparc_p_folder)
 
-# Build split_dict / test set
+# Test set
 if 'CAIA' in dataset:
     print(f"Using split_dict from load_dataset. Test size: {len(split_dict['test'])}")
 elif dataset == 'MSK':
@@ -748,7 +677,7 @@ model_set_option = 'side_effects_risk'
 option = f'{option}_risk'   # neutropenia_risk
 all_folds = list(range(10))
 
-# SPARC-P inference (FIRST CYCLE ONLY - for regeneration)
+# SPARC-P inference on the test set (10 folds)
 pl.seed_everything(rseed)
 anc_mode = True if 'CAIA' in dataset else False
 
@@ -781,7 +710,8 @@ for val_fold in all_folds:
         module_index_cfg=module_index_cfg,
         use_module_tokenizer=use_module_tokenizer, use_continuous_time=use_continuous_time,
         n_static_features=n_static_features, post_mlp_dropout=post_mlp_dropout, lr=learning_rate,
-    ).to(device)
+    batch_first=(args.batch_first == 'True'),
+).to(device)
     model.eval()
 
     all_preds, all_events, all_ttes, all_infus, all_dmp = [], [], [], [], []
@@ -826,7 +756,7 @@ for val_fold in all_folds:
     print(f"fold {val_fold}: {len(all_preds)} rows, {int(row_label.sum())} next-inf neutropenia positives")
 
 
-# Ensemble (positional row-wise mean; matches reference)
+# Ensemble: row-wise mean across folds (same test order in every fold)
 print("\nBuilding SPARC-P ensemble (positional row-wise mean across folds) ...")
 fold_lens = {f: len(sparc_fold_store[f]['preds']) for f in all_folds}
 if len(set(fold_lens.values())) != 1:
@@ -868,34 +798,28 @@ print("  [WIRED] chemo_classes, cancer_lyman, csf_prophylaxis from real sources;
 
 lyman_prob_rows = np.array([lyman_by_patient.get(d, {}).get('prob', np.nan) for d in ens_dmp_all])
 
-# Get first cycle index for later use
 first_idx = int(ens_cycle_all.min())
 print(f"\nFirst cycle index: {first_idx}")
 
-# Train LYMAN_retrained model (single model on combined train+val)
+# Lyman_retrained: single LR on train+val first-cycle rows
 print("\n=== Training LYMAN_retrained logistic regression model (train+val combined) ===")
 
-# Load train+val data (use mode='train' which includes train+val for fold 0)
-# Since we're doing external validation on test set, we can use all non-test data
 _, _, split_dict_trainval, _, _ = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option='neutropenia', modules=modules,
-    valfold=0, mode='train', rseed=rseed,  # fold doesn't matter, we'll combine train+val
+    valfold=0, mode='train', rseed=rseed,  # fold irrelevant; train+val are combined
     competing_risk_death_check=False, include_gcsf=include_gcsf,
     data_fraction_option='default', quick_test=False, caia_portion=caia_portion,
 )
 
-# Get both train and val patient IDs
 train_val_ids = list(split_dict_trainval['train']) + list(split_dict_trainval['val'])
 print(f"Combined train+val: {len(split_dict_trainval['train'])} train + {len(split_dict_trainval['val'])} val = {len(train_val_ids)} total patients")
 
-# Create combined split_dict
 split_dict_combined = {
     'train': train_val_ids,
     'val': [],
     'test': split_dict_trainval['test']
 }
 
-# Create data module with combined train+val
 data_module_combined = FlexibleFeatureDataModule(
     data_dict_lab_dict, split_dict_combined, dataset=dataset, component=component,
     batch_size=batch_size, max_time_len=20, num_workers=1,
@@ -904,23 +828,19 @@ data_module_combined = FlexibleFeatureDataModule(
     include_infusion_dates=add_num_infusion, premed_only=False, competing_risk_death_check=False,
     anc=anc_mode, test_shuffle=False)
 
-# Get first-cycle data for training from combined train+val set
 train_features_list = []
 train_labels = []
 train_seen_patients = set()
 
 print("Extracting first-cycle features from train+val patients...")
-# Iterate through train dataloader
 for batch in data_module_combined.train_dataloader():
-    # Batch structure: ((xs, times, num_infusion, DMP_ID), y)
-    # where y = (fail, tte) for risk tasks
+    # batch = ((xs, times, num_infusion, DMP_ID), (fail, tte))
     try:
         (xs, times, num_inf, dmp_ids), y = batch
     except (ValueError, TypeError):
         print(f"  [WARN] Unexpected batch structure, skipping batch")
         continue
 
-    # Extract labels
     if isinstance(y, (list, tuple)) and len(y) >= 2:
         fail = y[0]
         tte = y[1]
@@ -928,7 +848,6 @@ for batch in data_module_combined.train_dataloader():
         print(f"  [WARN] Unexpected y structure, skipping batch")
         continue
 
-    # Convert to numpy arrays
     if isinstance(fail, torch.Tensor):
         fail = fail.cpu().numpy()
     else:
@@ -949,26 +868,21 @@ for batch in data_module_combined.train_dataloader():
     elif not isinstance(dmp_ids, (list, tuple)):
         dmp_ids = list(dmp_ids)
 
-    # For each sample in batch
     for i in range(len(dmp_ids)):
         dmp_id = dmp_ids[i]
-        # Only use the FIRST cycle and only once per patient. Use first_idx (the
-        # minimum cycle index actually present) rather than a hardcoded value, so
-        # this matches the 0-indexed cycle numbering used everywhere else.
+        # first cycle only, one row per patient
         if int(round(float(num_inf[i]))) == first_idx and dmp_id not in train_seen_patients:
             train_seen_patients.add(dmp_id)
             feats = build_lyman_features(dmp_id, cutoff_date=None)
             train_features_list.append(feats)
-            # Label: next-infusion neutropenia (event==1 & tte==1)
+            # next-infusion neutropenia (event==1 & tte==1)
             label = 1 if (fail[i] == 1 and tte[i] == 1) else 0
             train_labels.append(label)
 
-# Build feature matrix
 X_train, feature_names = build_feature_matrix(train_features_list, include_placeholders=True)
 y_train = np.array(train_labels)
 
-# DIAGNOSTIC: training set health. A near-zero positive count or a degenerate
-# feature matrix (all-zero columns) explains a chance-level retrained AUROC.
+# Training-set sanity check: few positives or all-zero columns -> chance-level AUROC
 print(f"[TRAIN DIAG] first_idx used for training filter = {first_idx}")
 print(f"[TRAIN DIAG] training patients = {len(y_train)}, positives = {int(y_train.sum())} "
       f"({(y_train.sum()/len(y_train) if len(y_train) else 0):.2%})")
@@ -985,7 +899,6 @@ if len(y_train) == 0 or y_train.sum() == 0 or y_train.sum() == len(y_train):
 
 print(f"Training samples: {len(y_train)} unique patients, {int(y_train.sum())} positives ({y_train.sum()/len(y_train):.2%})")
 
-# Fit logistic regression
 print("Fitting logistic regression model...")
 lr_model = LogisticRegression(random_state=rseed, max_iter=1000, class_weight='balanced', solver='lbfgs')
 lr_model.fit(X_train, y_train)
@@ -998,15 +911,12 @@ print(f"  {'intercept':15s}: {lr_model.intercept_[0]:7.4f}")
 print("\n(Published Lyman coefficients not available -> no original-vs-refit comparison; "
       "the retrained model is the primary Lyman comparator.)")
 
-# Compute predictions for test set
 print("\nComputing LYMAN_retrained predictions on test set...")
 features_list = [lyman_by_patient[d]['feats'] for d in np.unique(ens_dmp_all)]
 X_test, _ = build_feature_matrix(features_list, include_placeholders=True)
 
-# Predict probabilities
-test_probs = lr_model.predict_proba(X_test)[:, 1]  # probability of class 1
+test_probs = lr_model.predict_proba(X_test)[:, 1]
 
-# Map back to all rows
 dmp_to_prob = dict(zip(np.unique(ens_dmp_all), test_probs))
 lyman_retrained_probs = np.array([dmp_to_prob[d] for d in ens_dmp_all])
 print(f"LYMAN_retrained predictions computed for {len(np.unique(ens_dmp_all))} test patients")
@@ -1065,9 +975,9 @@ def _weighted_auroc_auprc(preds, labels, cycles):
 
 rows = []
 
-# DIAGNOSTIC: SPARC-P across all cycles (overall + weighted) - FROM CSV
+# All-cycles SPARC-P reference row, from the existing CSV
 if run_diagnostics and HAVE_EXISTING_CSV:
-    print("\n############### SPARC-P ALL-CYCLES FROM CSV ###############")
+    print("\nSPARC-P all-cycles from CSV")
     print(f"Using existing CSV values:")
     print(f"  n_test={n_test_existing}, n_pos_next_infusion={n_pos_next_infusion_existing}")
     print(f"  AUROC={auroc_existing:.4f} [{auroc_ci_lower_existing:.4f}, {auroc_ci_upper_existing:.4f}]")
@@ -1077,7 +987,7 @@ if run_diagnostics and HAVE_EXISTING_CSV:
                  'n': n_test_existing, 'n_pos': n_pos_next_infusion_existing,
                  'auroc': auroc_existing, 'auroc_ci_lower': auroc_ci_lower_existing, 'auroc_ci_upper': auroc_ci_upper_existing,
                  'auprc': auprc_existing, 'auprc_ci_lower': auprc_ci_lower_existing, 'auprc_ci_upper': auprc_ci_upper_existing})
-    print("############################################################\n")
+    print()
 
 
 # Comparison harness
@@ -1088,7 +998,7 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     valid = ~np.isnan(cp)
     y, sp, cp = y[valid], sp[valid], cp[valid]
     n, npos = len(y), int(y.sum())
-    print(f"\n================= {tag} =================")
+    print(f"\n{tag}")
     print(f"n = {n}, positives = {npos} ({(npos/n if n else 0):.2%})")
     if n == 0 or len(np.unique(y)) < 2:
         print("[WARN] single-class or empty subset; cannot compute AUROC/AUPRC.")
@@ -1102,7 +1012,7 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     ce_auroc = roc_auc_score(y, cp); ce_auprc = average_precision_score(y, cp)
     ce_a_ci = _bootstrap_ci(y, cp, 'auroc'); ce_p_ci = _bootstrap_ci(y, cp, 'auprc')
 
-    # DeLong test for comparing AUROCs
+    # DeLong test, SPARC-P vs comparator AUROC
     try:
         delong_result = delong_roc_test(y, sp, cp)
         delong_pvalue = delong_result['pvalue']
@@ -1123,28 +1033,27 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     rows.append({'comparison': tag, 'model': comparator_name, 'n': n, 'n_pos': npos,
                  'auroc': ce_auroc, 'auroc_ci_lower': ce_a_ci[0], 'auroc_ci_upper': ce_a_ci[1],
                  'auprc': ce_auprc, 'auprc_ci_lower': ce_p_ci[0], 'auprc_ci_upper': ce_p_ci[1]})
-    # Add significance test result row
+    # DeLong row: auroc = p-value, auroc_ci_lower = z, auroc_ci_upper = AUROC diff
     rows.append({'comparison': f'{tag}_significance_test',
                  'model': f'SPARC-P_vs_{comparator_name}',
                  'n': n, 'n_pos': npos,
-                 'auroc': delong_pvalue,  # Store p-value in auroc column for convenience
-                 'auroc_ci_lower': delong_z,  # Store z-score in ci_lower column
-                 'auroc_ci_upper': sp_auroc - ce_auroc,  # Store AUROC difference
+                 'auroc': delong_pvalue,
+                 'auroc_ci_lower': delong_z,
+                 'auroc_ci_upper': sp_auroc - ce_auroc,
                  'auprc': None, 'auprc_ci_lower': None, 'auprc_ci_upper': None})
 
 
 _lyman_label = 'Lyman_published'
 _lyman_retrained_label = 'Lyman_retrained'
 
-# (a) first-cycle only (regenerated)
+# (a) first cycle only
 first_idx = int(ens_cycle_all.min())
 fc_mask = (ens_cycle_all == first_idx)
 print(f"\n\n=== FIRST CYCLE COMPARISON (cycle=={first_idx}) ===")
 _run_comparison(f'LYMAN_firstcycle (cycle=={first_idx})', fc_mask, lyman_prob_rows, _lyman_label)
 _run_comparison(f'LYMAN_retrained_firstcycle (cycle=={first_idx})', fc_mask, lyman_retrained_probs, _lyman_retrained_label)
 
-# (b) PATIENT-LEVEL EVER-POSITIVE (primary): both models per patient.
-#     Lyman is a first-cycle/baseline model; SPARC-P aggregated by MAX risk.
+# (b) Patient-level ever-positive (primary); SPARC-P aggregated by max risk.
 patient_ids = np.unique(ens_dmp_all)
 pat_label, pat_sparc_max, pat_sparc_mean, pat_lyman, pat_lyman_retrained = [], [], [], [], []
 for d in patient_ids:
@@ -1153,7 +1062,7 @@ for d in patient_ids:
     pat_sparc_max.append(float(ens_pred_all[m].max()))
     pat_sparc_mean.append(float(ens_pred_all[m].mean()))
     pat_lyman.append(lyman_by_patient.get(d, {}).get('prob', np.nan))
-    # For retrained, get the prob for this patient from any row
+    # retrained prob is per patient, so any row works
     pat_lyman_retrained.append(lyman_retrained_probs[np.where(ens_dmp_all == d)[0][0]])
 
 pat_label = np.array(pat_label); pat_sparc_max = np.array(pat_sparc_max)
@@ -1163,7 +1072,7 @@ pat_lyman_retrained = np.array(pat_lyman_retrained)
 _valid = ~np.isnan(pat_lyman)
 _y = pat_label[_valid]; _sp = pat_sparc_max[_valid]; _dr = pat_lyman[_valid]; _dr_ret = pat_lyman_retrained[_valid]
 n_pat, n_pos_pat = len(_y), int(_y.sum())
-print(f"\n================= LYMAN_patient_level_ever_positive =================")
+print(f"\nLYMAN_patient_level_ever_positive")
 print(f"patients = {n_pat}, ever-positive = {n_pos_pat} ({(n_pos_pat/n_pat if n_pat else 0):.2%})")
 print(f"(SPARC-P aggregated by MAX risk across each patient's cycles)")
 if n_pat > 0 and len(np.unique(_y)) >= 2:
@@ -1175,7 +1084,6 @@ if n_pat > 0 and len(np.unique(_y)) >= 2:
     dr_ret_a_ci = _bootstrap_ci(_y, _dr_ret, 'auroc'); dr_ret_p_ci = _bootstrap_ci(_y, _dr_ret, 'auprc')
     spm_auroc = roc_auc_score(_y, pat_sparc_mean[_valid])
 
-    # DeLong tests for patient-level comparisons
     try:
         delong_orig = delong_roc_test(_y, _sp, _dr)
         delong_ret = delong_roc_test(_y, _sp, _dr_ret)
@@ -1207,7 +1115,7 @@ if n_pat > 0 and len(np.unique(_y)) >= 2:
                  'n': n_pat, 'n_pos': n_pos_pat,
                  'auroc': dr_ret_auroc, 'auroc_ci_lower': dr_ret_a_ci[0], 'auroc_ci_upper': dr_ret_a_ci[1],
                  'auprc': dr_ret_auprc, 'auprc_ci_lower': dr_ret_p_ci[0], 'auprc_ci_upper': dr_ret_p_ci[1]})
-    # Add significance test results for patient-level
+    # DeLong rows (same column convention as above)
     rows.append({'comparison': 'LYMAN_patient_level_ever_positive_significance_test',
                  'model': f'SPARC-P_vs_{_lyman_label}',
                  'n': n_pat, 'n_pos': n_pos_pat,
@@ -1233,7 +1141,6 @@ for f in all_folds:
                  'n': int(fc.sum()), 'n_pos': int(s['label'][fc].sum()),
                  'auroc': None, 'auprc': None})
 
-# NOTE row
 rows.append({'comparison': 'NOTE', 'model':
              'outcome=OUR_neutropenia_label (Lyman endpoint is SN-or-FN composite, cycle1); '
              'active terms=age,WBC,AST,ALP,bilirubin,GFR; '

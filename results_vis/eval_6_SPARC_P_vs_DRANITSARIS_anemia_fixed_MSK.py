@@ -1,55 +1,8 @@
-"""SPARC-P vs Dranitsaris severe-anemia (Hb<8 g/dL) model.
+"""SPARC-P vs the Dranitsaris severe-anemia (Hb<8 g/dL) model on the MSK anemia cohort.
 
-Comparators: `dranitsaris`, the published logistic model scored as a linear
-predictor (sum of beta*x; ORs are per-group, so this is a direct logistic
-score), and `dranitsaris_retrained`, the same features refit on our train set
-as 10 per-fold models, averaged.
-
-Reference: Dranitsaris G, Clemons M, Verma S, et al. A risk prediction model
-for severe chemotherapy-induced anemia (Hb<8 g/dL) in breast cancer patients.
-Table 2, training-set ORs; beta = ln(OR):
-
-    Variable      Group (vs reference)        OR     beta
-    Age           >65 vs <=65                1.47  +0.38526
-    TNM stage     III vs I/II                1.57  +0.45108   DROPPED, no stage in CAIA
-                  IV  vs I/II                1.71  +0.53649   DROPPED, no stage in CAIA
-    Chemo regimen 6 breast-specific cats  0.52-2.10           DROPPED, see below
-    Baseline Hb   M<14 / F<12 vs normal      3.14  +1.14422
-    Steroid use   yes vs no                  1.83  +0.60432
-    MCV           <81 vs 81-99               1.06  +0.05827
-                  >99 vs 81-99               3.20  +1.16315
-    GFR           0<=GFR<60 vs >=60          2.01  +0.69813
-
-Chemo regimen is dropped because Dranitsaris's categories are breast-adjuvant
-combinations (AC->TXT, TAC, CMF) that do not map onto this pan-cancer, largely
-single-agent cohort -- nearly everyone would collapse to "other". An
-approximate name-based mapping could revisit this.
-
-Retained are age>65, sex-specific baseline Hb, steroid use, MCV bands and
-GFR<60, which keeps the model's strongest terms (Hb 3.14, MCV>99 3.20, GFR
-2.01, steroid 1.83), so the reduced form keeps its discriminative core.
-
-The intercept is not reported in the paper. It is an additive constant on the
-linear predictor, so it cannot affect ranking and AUROC/AUPRC are unchanged;
-prob = sigmoid(linear predictor) is therefore uncalibrated but AUROC-invariant.
-
-Cohort is the anemia task's chemotherapy patients. Dranitsaris was derived on
-breast adjuvant, so this is external, off-population validation. The outcome is
-our grade-3 anemia next-infusion label (event==1 & tte==1), which matches the
-paper's Hb<8 endpoint on grade -- the cleanest endpoint match of the set.
-
-Data sources, all date-keyed {DMP_ID: {delta_day: ...}}, cutoff <= cycle day:
-  * HGB, MCV, creatinine: data_dict_lab_dict['lab_def_dict'], raw real units
-  * age:  data_dict_lab_dict['age'], 5-year bins, age ~ 5*bin
-  * sex:  data_dict_lab_dict['gender'], one-hot with MALE dropped
-  * steroid: DMP_ID_to_DATE_to_SUPPORTIVE_MEDS_DICT_delta_till2021_031226.pickle
-    as {DMP_ID: {delta_day: [['LT_steroids', day], ...]}}; steroid use is any
-    'LT_steroids' entry on or before the cutoff
-  * GFR: CKD-EPI (2009) from creatinine, age and sex, as in the FENCE script
-
-Three comparisons are reported: patient-level ever-positive (primary; one row
-per patient, Dranitsaris baseline score vs SPARC-P max risk across cycles),
-per-cycle valid-infusion (SPARC-P's native framing), and first-cycle only.
+Comparators: published model as a linear predictor (beta = ln OR, Dranitsaris et al.,
+Table 2 training-set ORs; intercept unreported, so prob is uncalibrated but AUROC-invariant)
+and the same features refit with logistic regression on train+val.
 """
 
 import os
@@ -93,10 +46,9 @@ CREAT_INDEX = ALL_INCLUDED_TESTS.index('Creatinine')
 
 AGE_BIN_YEARS = 5.0
 
-# Import DeLong test for significance testing
 from delong_test import delong_roc_test
 
-# torchmetrics for AUROC/AUPRC (parity with reference eval)
+# torchmetrics AUROC/AUPRC to match the reference eval
 from torchmetrics import AUROC as _TMAUROC, AveragePrecision as _TMAP
 _tm_auroc = _TMAUROC(task='binary')
 _tm_auprc = _TMAP(task='binary')
@@ -114,8 +66,8 @@ def average_precision_score(y_true, y_score):
     return _tm_auprc(ys, yt).item()
 
 
-# =========================  DRANITSARIS SEVERE-CIA  ========================
-# beta = ln(OR), TRAINING-set ORs from Table 2 (FULL model for MSK breast cohort).
+# Dranitsaris severe-CIA model
+# beta = ln(OR), Table 2 training-set ORs.
 DRAN_BETA = {
     'age_gt65':   np.log(1.47),   # +0.38526
     'hb_low':     np.log(3.14),   # +1.14422 (M<14 / F<12 g/dL)
@@ -123,18 +75,15 @@ DRAN_BETA = {
     'mcv_lt81':   np.log(1.06),   # +0.05827
     'mcv_gt99':   np.log(3.20),   # +1.16315
     'gfr_lt60':   np.log(2.01),   # +0.69813
-    # TNM stage (vs I/II reference) -- RESTORED for MSK (stage available)
+    # TNM stage vs I/II
     'stage_iii':  np.log(1.57),   # +0.45108
     'stage_iv':   np.log(1.71),   # +0.53649
-    # Chemo regimen (vs AC->TXT/TAC reference) -- RESTORED, best-effort mapping.
-    # Dranitsaris Table 2 ORs: AC->TAX 1.43, CARBO+TAX/TAC 1.50, CARBO+TXT/TXT 2.10,
-    # CMF/CTX+TXT 0.52, other 1.08.
+    # Chemo regimen vs AC->TXT/TAC (approximate mapping, see get_regimen_category)
     'regimen_ac_tax':      np.log(1.43),
     'regimen_carbo_tax':   np.log(1.50),
     'regimen_carbo_txt':   np.log(2.10),
     'regimen_cmf':         np.log(0.52),
     'regimen_other':       np.log(1.08),
-    # reference regimen (AC->TXT / TAC) = 0
 }
 
 
@@ -143,7 +92,7 @@ def _sigmoid(x):
 
 
 def compute_egfr_ckd_epi(creat_mgdl, age, is_female):
-    """CKD-EPI 2009 eGFR (mL/min/1.73m^2); identical to the FENCE accessor."""
+    """CKD-EPI 2009 eGFR (mL/min/1.73m^2), same as the FENCE script."""
     if creat_mgdl is None or age is None or creat_mgdl <= 0:
         return None
     if is_female:
@@ -156,7 +105,7 @@ def compute_egfr_ckd_epi(creat_mgdl, age, is_female):
 
 def dranitsaris_features_to_lp(feats, include_steroid=True, include_stage=True,
                                include_regimen=True):
-    """Linear predictor over the (restored) Dranitsaris terms."""
+    """Dranitsaris linear predictor (sum of beta*x)."""
     B = DRAN_BETA
     lp = 0.0
     if feats['age'] is not None and feats['age'] > 65:
@@ -174,14 +123,12 @@ def dranitsaris_features_to_lp(feats, include_steroid=True, include_stage=True,
             lp += B['mcv_gt99']
     if feats['egfr'] is not None and feats['egfr'] < 60:
         lp += B['gfr_lt60']
-    # TNM stage (III / IV vs I-II)
     if include_stage:
         st = feats.get('stage_num')
         if st == 3:
             lp += B['stage_iii']
         elif st is not None and st >= 4:
             lp += B['stage_iv']
-    # Chemo regimen category (best-effort)
     if include_regimen:
         reg = feats.get('regimen', 'reference')
         key = {'ac_tax': 'regimen_ac_tax', 'carbo_tax': 'regimen_carbo_tax',
@@ -198,9 +145,7 @@ def dranitsaris_score_and_prob(feats, include_steroid=True):
 
 
 def build_feature_matrix(features_list, include_steroid=True):
-    """Feature matrix for the retrained logistic regression. Includes the full
-    restored feature set: age_gt65, hb_low, [steroid], mcv bands, gfr, stage III/IV
-    indicators, and regimen-category indicators."""
+    """Indicator matrix for the retrained LR (same terms as the published model)."""
     X = []
     _REG = ['ac_tax', 'carbo_tax', 'carbo_txt', 'cmf', 'other']  # reference dropped
     for feats in features_list:
@@ -219,11 +164,9 @@ def build_feature_matrix(features_list, include_steroid=True):
         else:
             row.append(0.0); row.append(0.0)
         row.append(1.0 if (feats['egfr'] is not None and feats['egfr'] < 60) else 0.0)
-        # stage III / IV indicators (vs I-II reference)
         st = feats.get('stage_num')
         row.append(1.0 if st == 3 else 0.0)
         row.append(1.0 if (st is not None and st >= 4) else 0.0)
-        # regimen category indicators (vs reference)
         reg = feats.get('regimen', 'reference')
         for rc in _REG:
             row.append(1.0 if reg == rc else 0.0)
@@ -238,19 +181,16 @@ def build_feature_matrix(features_list, include_steroid=True):
     return np.array(X), feature_names
 
 
-# ===============================  ARG PARSE  ================================
-# Roots for the argparse defaults below; each is overridable by env var or by
-# the corresponding CLI flag. Results go to results_vis_060726_batch_091426 so
-# runs here do not overwrite results_vis_060726; reference CSVs are still read
-# from the original tree.
+# Arguments
+# Default roots; override via env var or CLI flag.
 SPARC_DATA_ROOT = os.environ.get(
     'SPARC_DATA_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_data')
 SPARC_MODEL_ROOT = os.environ.get(
-    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726')
+    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426')
 SPARC_RESULTS_ROOT = os.environ.get(
-    'SPARC_RESULTS_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726_batch_091426')
+    'SPARC_RESULTS_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426/results_vis_eval1_bfTrue')
 SPARC_REF_ROOT = os.environ.get(
-    'SPARC_REF_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726')
+    'SPARC_REF_ROOT', '/nonexistent/no_bf_false_reference_row')
 
 parser = argparse.ArgumentParser(prog='eval_SPARC_P_vs_DRANITSARIS_anemia_fixed')
 parser.add_argument("-r", "--rseed", type=int, default=1024)
@@ -266,9 +206,10 @@ parser.add_argument("-z", "--zeroshot", type=str, default='True')
 parser.add_argument("-mm", "--missing_mask", type=str, default="True")
 parser.add_argument("-en", "--ensemble", type=str, default='True')
 parser.add_argument("-dsp", "--data_source_path", type=str, default=f'{SPARC_DATA_ROOT}/')
-parser.add_argument("-mp", "--model_path", type=str, default=f'{SPARC_MODEL_ROOT}')
+parser.add_argument("-mp", "--model_path", type=str,
+                    default=os.environ.get('SPARC_EVAL7_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_MSK_sparcp_bfTrue_092926'))
 parser.add_argument("-rp", "--results_path", type=str,
-                    default=f'{SPARC_RESULTS_ROOT}/eval_clinical_benchmarks')
+                    default=f'{SPARC_RESULTS_ROOT}/eval7_comparators_MSK_bfTrue')
 parser.add_argument("--existing_csv", type=str,
                     default=f'{SPARC_REF_ROOT}/'
                             'eval_across_models_valthresh_disabled/model_performance_dict_across_models_parsimonious_anemia_MSK_ensemble.csv')
@@ -298,6 +239,10 @@ parser.add_argument("--cohort_version", type=str, default='all',
                          "'capecitabine': breast AND capecitabine -- ALWAYS EMPTY, "
                          "because capecitabine is oral and the meds source is "
                          "non-oral only; the script exits if selected.")
+parser.add_argument("-bf", "--batch_first", type=str, default='True',
+                    help="True | False -- build SPARC with batch_first=True so the encoder "
+                         "attends over time. MUST match how the checkpoints were trained; "
+                         "a mismatch loads silently.")
 args = parser.parse_args()
 
 rseed = args.rseed
@@ -320,7 +265,7 @@ demographic_path = args.demographic_path
 med_classification_path = args.med_classification_path
 cohort_version = args.cohort_version
 
-# LOCKED settings
+# Fixed for this analysis
 option = 'anemia'
 add_num_infusion = True
 
@@ -346,7 +291,7 @@ learning_rate = 1e-4
 include_gcsf = False
 component = 'parsimonious'
 
-# Load existing CSV to get n and n_pos
+# Optional all-cycles reference row from an existing eval CSV
 print(f"\nLoading existing CSV (optional) from: {existing_csv_path}")
 HAVE_EXISTING_CSV = os.path.exists(existing_csv_path)
 if HAVE_EXISTING_CSV:
@@ -378,7 +323,6 @@ else:
     auroc_ci_lower_existing = auroc_ci_upper_existing = None
     auprc_ci_lower_existing = auprc_ci_upper_existing = None
 
-# Load dataset
 print("\nLoading dataset ...")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option=option, modules=modules,
@@ -391,7 +335,6 @@ print("Data loaded.")
 module_index_cfg = build_module_index_config(modular_featuredim_dict, advanced_model='default')
 n_static_features = module_index_cfg['n_static']
 
-# Load steroid auxiliary data
 print("\nLoading Dranitsaris auxiliary data (MSK) ...")
 
 def _try_load_pickle(path, label):
@@ -406,23 +349,10 @@ def _try_load_pickle(path, label):
 import pandas as _pd
 from collections import defaultdict as _dd
 
-# --- Steroid exposure -> {DMP_ID: [days]} --------------------------------
-# Two accepted sources, chosen by file extension:
-#
-#   .pkl/.pickle  SPARC_data/MSK/DMP_ID_to_DATE_to_STEROID_dict.pkl, shaped
-#                 {DMP_ID: {day: [drug, ...]}}. This is the source used here.
-#                 The file holds four drugs -- dexamethasone (49,067 patients),
-#                 methylprednisolone (9,736), prednisone (7,581) and
-#                 methotrexate (2,437). Only the first three are
-#                 corticosteroids; methotrexate is an antimetabolite and is
-#                 NOT counted. Override the set with --steroid_marker as a
-#                 comma-separated list.
-#
-#   .csv          the original t08_2_idb_impact_dexamethasone_meds.csv export
-#                 (dexamethasone only), matched on an id and day-offset column.
-#
-# Note the original CSV was dexamethasone-only, so the pickle default counts
-# strictly more exposure than the CSV would have.
+# Steroid exposure -> {DMP_ID: [days]}.
+# .pkl: {DMP_ID: {day: [drug, ...]}}; counts dexamethasone, methylprednisolone,
+#   prednisone (the file also has methotrexate, which is not a corticosteroid).
+# .csv: legacy dexamethasone-only export.
 steroid_days = {}
 _is_pickle = str(steroid_path).lower().endswith(('.pkl', '.pickle'))
 
@@ -448,7 +378,6 @@ if _is_pickle and os.path.exists(steroid_path):
           f"(pickle; drugs={sorted(_STEROID_DRUGS)})")
 elif os.path.exists(steroid_path):
     _sdf = _pd.read_csv(steroid_path)
-    # try to locate id + day columns robustly
     _id_col = next((c for c in _sdf.columns if c.upper() in ('DMP_ID', 'MRN', 'PATIENT_ID')), None)
     _day_col = next((c for c in _sdf.columns
                      if 'anchor' in c.lower() or 'dte_since' in c.lower() or 'day' in c.lower()), None)
@@ -466,12 +395,12 @@ elif os.path.exists(steroid_path):
 else:
     print(f"  [steroid] NOT FOUND at {steroid_path} -> steroid term disabled")
 DRAN_INCLUDE_STEROID = len(steroid_days) > 0
-DRAN_N_VARS = 8 if DRAN_INCLUDE_STEROID else 7   # full: age,hb,[steroid],mcv,gfr,stage,regimen
+DRAN_N_VARS = 8 if DRAN_INCLUDE_STEROID else 7
 
-# --- TNM stage pickle {DMP_ID: {day: 1-4}} -------------------------------
+# TNM stage {DMP_ID: {day: 1-4}}
 stage_dict = _try_load_pickle(stage_path, 'stage')
 
-# --- Demographic CSV: cancer type (breast filter) ------------------------
+# Cancer type, for the breast filter
 CTYPE_DICT = {}
 if os.path.exists(demographic_path):
     _dfd = _pd.read_csv(demographic_path)
@@ -481,15 +410,13 @@ if os.path.exists(demographic_path):
 else:
     print(f"  [cancer_type][WARN] demographic CSV not found at {demographic_path}")
 
-# --- LLM med classification (for regimen category mapping) ---------------
+# LLM drug classification, for regimen mapping
 med_cls = _try_load_pickle(med_classification_path, 'med_classification')
 med_cls = {str(k).strip().upper(): v for k, v in med_cls.items()}
 
-# --- MSK meds dict (for regimen / capecitabine detection) ----------------
 MED_DICT = data_dict_lab_dict.get('DMP_ID_to_DATE_to_NON_ORAL_MEDS_DICT', {})
 print(f"  [meds] {len(MED_DICT)} patients in meds dict")
 
-# Accessors
 LAB_DEF = data_dict_lab_dict.get('lab_def_dict', {})
 if not LAB_DEF:
     print("[WARN] lab_def_dict empty; labs default to missing.")
@@ -576,8 +503,7 @@ def _entry_name(e):
 
 
 def get_steroid(dmp_id, cutoff_date=None):
-    """True if a dexamethasone/steroid record exists on/before cutoff (or before
-    index day if cutoff None), from the steroid CSV {DMP_ID: [days]}."""
+    """True if any steroid day is on/before cutoff (index day if cutoff is None)."""
     days = steroid_days.get(dmp_id)
     if days is None:
         days = steroid_days.get(str(dmp_id)) or steroid_days.get(_safe_int(dmp_id))
@@ -590,8 +516,7 @@ def get_steroid(dmp_id, cutoff_date=None):
 
 
 def get_stage_num(dmp_id, cutoff_date=None):
-    """Max numeric TNM stage (1-4) on/before cutoff, from the stage pickle. None if
-    unavailable."""
+    """Max TNM stage (1-4) on/before cutoff, or None."""
     rec = _lookup_flexible(stage_dict, dmp_id)
     if not rec:
         return None
@@ -610,11 +535,10 @@ def get_stage_num(dmp_id, cutoff_date=None):
 
 
 def get_regimen_category(dmp_id, cutoff_date=None):
-    """Best-effort map of the patient's first-cycle regimen to Dranitsaris's
-    categories, using LLM chemo_class of the drugs given on the index day.
-    Categories: 'reference' (AC->TXT/TAC), 'ac_tax', 'carbo_tax', 'carbo_txt',
-    'cmf', 'other'. This is APPROXIMATE -- Dranitsaris categories are specific
-    breast combination regimens; we infer from drug-class presence."""
+    """Approximate Dranitsaris regimen category from drug classes on the index day.
+
+    Returns 'reference' (AC->TXT/TAC), 'ac_tax', 'carbo_tax', 'carbo_txt', 'cmf' or 'other'.
+    """
     sched = MED_DICT.get(dmp_id)
     if not isinstance(sched, dict) or not sched:
         return 'other'
@@ -634,7 +558,6 @@ def get_regimen_category(dmp_id, cutoff_date=None):
     has_tax = 'taxane' in classes
     has_alk = 'nonplatinum_alkylating' in classes
     has_anti = 'antimetabolite' in classes
-    # heuristic mapping to Dranitsaris regimen buckets
     if has_plat and has_tax:
         return 'carbo_tax'
     if has_plat:
@@ -648,7 +571,7 @@ def get_regimen_category(dmp_id, cutoff_date=None):
     return 'other'
 
 
-# ------------------ cohort filters (breast / capecitabine) ------------------
+# Cohort filters
 def is_breast(dmp_id):
     ct = CTYPE_DICT.get(dmp_id)
     return ct is not None and 'breast' in str(ct).strip().lower()
@@ -683,10 +606,10 @@ def build_dranitsaris_features(dmp_id, cutoff_date=None):
     }
 
 
-# Model folder (SPARC-P, anemia -> hybrid)
+# SPARC-P model folder
 all_model_path = model_path
 base_option = 'anemia'
-model_type_suffix = 'hybrid'   # anemia/neutropenia/FN use 'hybrid' finetuned checkpoints
+model_type_suffix = 'hybrid'
 
 if dataset == 'MSK':
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_060726/SPARC_finetuned_models/'
@@ -695,12 +618,14 @@ elif dataset in ['MSK_CAIA', 'MSK_CAIA_timeshift', 'stanfordEHRSHOT'] or (datase
     sparc_p_folder = (f'{all_model_path}/{modules}_MSK_CAIA_060726/SPARC_finetuned_models/'
                       f'{modules}_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 else:
+    if args.batch_first == 'True':
+        raise SystemExit("No batch_first=True MIMICIV_hosp-finetuned SPARC exists; the only MIMICIV-finetuned models are the published bf=False ones. Use -z True (zero-shot from the bf=True CAIA models) or run the published repo.")
     mimiciv_sparc_path = f'{SPARC_MODEL_ROOT}/parsimonious_MIMICIV_hosp_060726'
     sparc_p_folder = (f'{mimiciv_sparc_path}/SPARC_finetuned_models/'
                       f'parsimonious_finetuned_models_{model_type_suffix}_{base_option}_20tp_topchemos_att_modular')
 print("SPARC-P folder:", sparc_p_folder)
 
-# Build split_dict / test set
+# Test split
 if 'CAIA' in dataset:
     print(f"Using split_dict from load_dataset. Test size: {len(split_dict['test'])}")
 elif dataset == 'MSK':
@@ -721,28 +646,18 @@ elif dataset == 'MIMICIV_hosp':
     tids = [d for d in fr['test'] if d in data_dict_lab_dict.get('basic_lab', data_dict_lab_dict.get('age', {})).keys()]
     split_dict = {'train': [], 'val': [], 'test': tids}
 
-# ---- Dranitsaris cohort restriction: breast-only, optionally capecitabine ----
-# Dranitsaris was derived on breast-cancer capecitabine (adjuvant) patients. We
-# cannot enforce adjuvant/post-op (no surgical data), so we produce up to two
-# versions: 'all_breast' (all breast patients) and 'capecitabine' (breast AND
-# received capecitabine). The cohort restriction is applied to the TEST split here;
-# the retraining block trains on the analogous non-test breast/cape subset.
+# Cohort restriction (see --cohort_version). Adjuvant setting can't be enforced (no surgery data).
 _test_all = list(split_dict['test'])
 _breast_test = [d for d in _test_all if is_breast(d)]
 _cape_test = [d for d in _breast_test if takes_capecitabine(d)]
 print(f"\n[COHORT] test: all={len(_test_all)}, breast={len(_breast_test)}, "
       f"breast+capecitabine={len(_cape_test)}")
-# Cohort selection:
-#   'all'          -> no cancer restriction (full MSK anemia cohort; well-powered,
-#                     consistent with the other benchmarks' external-validation setup)
-#   'all_breast'   -> breast only (Dranitsaris's derivation cancer type; small)
-#   'capecitabine' -> breast AND capecitabine (unavailable: oral drug not in dict)
 if cohort_version == 'all':
     split_dict['test'] = _test_all
 elif cohort_version == 'capecitabine':
     split_dict['test'] = _cape_test
 else:
-    split_dict['test'] = _breast_test   # 'all_breast' (or 'both')
+    split_dict['test'] = _breast_test   # 'all_breast'; 'both' falls through here
 print(f"[COHORT] using '{cohort_version}' -> test size {len(split_dict['test'])}")
 if len(split_dict['test']) == 0:
     print("\n[COHORT][FATAL] selected cohort is EMPTY -> nothing to evaluate.")
@@ -757,7 +672,7 @@ model_set_option = 'side_effects_risk'
 option = f'{option}_risk'   # anemia_risk
 all_folds = list(range(10))
 
-# SPARC-P inference (FIRST CYCLE ONLY - for regeneration)
+# SPARC-P inference, all test rows
 pl.seed_everything(rseed)
 anc_mode = True if 'CAIA' in dataset else False
 
@@ -790,7 +705,8 @@ for val_fold in all_folds:
         module_index_cfg=module_index_cfg,
         use_module_tokenizer=use_module_tokenizer, use_continuous_time=use_continuous_time,
         n_static_features=n_static_features, post_mlp_dropout=post_mlp_dropout, lr=learning_rate,
-    ).to(device)
+    batch_first=(args.batch_first == 'True'),
+).to(device)
     model.eval()
 
     all_preds, all_events, all_ttes, all_infus, all_dmp = [], [], [], [], []
@@ -835,7 +751,7 @@ for val_fold in all_folds:
     print(f"fold {val_fold}: {len(all_preds)} rows, {int(row_label.sum())} next-inf anemia positives")
 
 
-# Ensemble (positional row-wise mean; matches reference)
+# Ensemble: row-wise mean across folds (same test order in every fold)
 print("\nBuilding SPARC-P ensemble (positional row-wise mean across folds) ...")
 fold_lens = {f: len(sparc_fold_store[f]['preds']) for f in all_folds}
 if len(set(fold_lens.values())) != 1:
@@ -855,7 +771,7 @@ ens_cycle_all = ref['cycle'].astype(int)
 print(f"Ensemble rows: {len(ens_pred_all)}, positives: {int(ens_label_all.sum())}")
 
 
-# Dranitsaris score per patient (baseline features)
+# Dranitsaris score per patient, baseline features
 print("\nComputing Dranitsaris severe-anemia scores (patient baseline features) ...")
 dran_by_patient = {}
 for dmp_id in np.unique(ens_dmp_all):
@@ -873,26 +789,21 @@ print(f"Dranitsaris scored {_n} patients. coverage: "
 
 dran_prob_rows = np.array([dran_by_patient.get(d, {}).get('prob', np.nan) for d in ens_dmp_all])
 
-# Get first cycle index for later use
 first_idx = int(ens_cycle_all.min())
 print(f"\nFirst cycle index: {first_idx}")
 
-# Train DRAN_retrained model (single model on combined train+val)
+# Retrained Dranitsaris: one LR on train+val
 print("\n=== Training DRAN_retrained logistic regression model (train+val combined) ===")
 
-# Load train+val data (use mode='train' which includes train+val for fold 0)
-# Since we're doing external validation on test set, we can use all non-test data
 _, _, split_dict_trainval, _, _ = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option='anemia', modules=modules,
-    valfold=0, mode='train', rseed=rseed,  # fold doesn't matter, we'll combine train+val
+    valfold=0, mode='train', rseed=rseed,
     competing_risk_death_check=False, include_gcsf=include_gcsf,
     data_fraction_option='default', quick_test=False, caia_portion=caia_portion,
 )
 
-# Get both train and val patient IDs
 train_val_ids = list(split_dict_trainval['train']) + list(split_dict_trainval['val'])
-# Apply the SAME cohort restriction as the test set so the retrained model is fit
-# on the matching population. 'all' -> no cancer restriction.
+# Same cohort restriction as the test set
 _before = len(train_val_ids)
 if cohort_version != 'all':
     train_val_ids = [d for d in train_val_ids if is_breast(d)]
@@ -901,14 +812,12 @@ if cohort_version != 'all':
 print(f"Combined train+val: {_before} -> {len(train_val_ids)} after "
       f"'{cohort_version}' cohort restriction")
 
-# Create combined split_dict
 split_dict_combined = {
     'train': train_val_ids,
     'val': [],
     'test': split_dict_trainval['test']
 }
 
-# Create data module with combined train+val
 data_module_combined = FlexibleFeatureDataModule(
     data_dict_lab_dict, split_dict_combined, dataset=dataset, component=component,
     batch_size=batch_size, max_time_len=20, num_workers=1,
@@ -917,23 +826,20 @@ data_module_combined = FlexibleFeatureDataModule(
     include_infusion_dates=add_num_infusion, premed_only=False, competing_risk_death_check=False,
     anc=anc_mode, test_shuffle=False)
 
-# Get first-cycle data for training from combined train+val set
+# One first-cycle row per train+val patient
 train_features_list = []
 train_labels = []
 train_seen_patients = set()
 
 print("Extracting first-cycle features from train+val patients...")
-# Iterate through train dataloader
 for batch in data_module_combined.train_dataloader():
-    # Batch structure: ((xs, times, num_infusion, DMP_ID), y)
-    # where y = (fail, tte) for risk tasks
+    # batch = ((xs, times, num_infusion, DMP_ID), (fail, tte))
     try:
         (xs, times, num_inf, dmp_ids), y = batch
     except (ValueError, TypeError):
         print(f"  [WARN] Unexpected batch structure, skipping batch")
         continue
 
-    # Extract labels
     if isinstance(y, (list, tuple)) and len(y) >= 2:
         fail = y[0]
         tte = y[1]
@@ -941,7 +847,6 @@ for batch in data_module_combined.train_dataloader():
         print(f"  [WARN] Unexpected y structure, skipping batch")
         continue
 
-    # Convert to numpy arrays
     if isinstance(fail, torch.Tensor):
         fail = fail.cpu().numpy()
     else:
@@ -962,25 +867,21 @@ for batch in data_module_combined.train_dataloader():
     elif not isinstance(dmp_ids, (list, tuple)):
         dmp_ids = list(dmp_ids)
 
-    # For each sample in batch
     for i in range(len(dmp_ids)):
         dmp_id = dmp_ids[i]
-        # Only use first cycle and only once per patient
-        if int(round(float(num_inf[i]))) == first_idx and dmp_id not in train_seen_patients:  # FIX: use first_idx (min cycle), not hardcoded 1
+        if int(round(float(num_inf[i]))) == first_idx and dmp_id not in train_seen_patients:
             train_seen_patients.add(dmp_id)
             feats = build_dranitsaris_features(dmp_id, cutoff_date=None)
             train_features_list.append(feats)
-            # Label: next-infusion anemia (event==1 & tte==1)
+            # next-infusion anemia label
             label = 1 if (fail[i] == 1 and tte[i] == 1) else 0
             train_labels.append(label)
 
-# Build feature matrix
 X_train, feature_names = build_feature_matrix(train_features_list, include_steroid=DRAN_INCLUDE_STEROID)
 y_train = np.array(train_labels)
 
 print(f"Training samples: {len(y_train)} unique patients, {int(y_train.sum())} positives ({y_train.sum()/len(y_train):.2%})")
 
-# Fit logistic regression
 print("Fitting logistic regression model...")
 lr_model = LogisticRegression(random_state=rseed, max_iter=1000, class_weight='balanced', solver='lbfgs')
 lr_model.fit(X_train, y_train)
@@ -999,15 +900,12 @@ print(f"  {'mcv_lt81':15s}: {np.log(1.06):7.4f} (original)")
 print(f"  {'mcv_gt99':15s}: {np.log(3.20):7.4f} (original)")
 print(f"  {'gfr_lt60':15s}: {np.log(2.01):7.4f} (original)")
 
-# Compute predictions for test set
 print("\nComputing DRAN_retrained predictions on test set...")
 features_list = [dran_by_patient[d]['feats'] for d in np.unique(ens_dmp_all)]
 X_test, _ = build_feature_matrix(features_list, include_steroid=DRAN_INCLUDE_STEROID)
 
-# Predict probabilities
-test_probs = lr_model.predict_proba(X_test)[:, 1]  # probability of class 1
+test_probs = lr_model.predict_proba(X_test)[:, 1]
 
-# Map back to all rows
 dmp_to_prob = dict(zip(np.unique(ens_dmp_all), test_probs))
 dran_retrained_probs = np.array([dmp_to_prob[d] for d in ens_dmp_all])
 print(f"DRAN_retrained predictions computed for {len(np.unique(ens_dmp_all))} test patients")
@@ -1066,7 +964,7 @@ def _weighted_auroc_auprc(preds, labels, cycles):
 
 rows = []
 
-# DIAGNOSTIC: SPARC-P across all cycles (overall + weighted) - FROM CSV
+# Diagnostic: all-cycles SPARC-P row copied from the existing CSV
 if run_diagnostics and HAVE_EXISTING_CSV:
     print("\n############### SPARC-P ALL-CYCLES FROM CSV ###############")
     print(f"Using existing CSV values:")
@@ -1106,7 +1004,6 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     ce_auroc = roc_auc_score(y, cp); ce_auprc = average_precision_score(y, cp)
     ce_a_ci = _bootstrap_ci(y, cp, 'auroc'); ce_p_ci = _bootstrap_ci(y, cp, 'auprc')
 
-    # DeLong test for comparing AUROCs
     try:
         delong_result = delong_roc_test(y, sp, cp)
         delong_pvalue = delong_result['pvalue']
@@ -1127,28 +1024,27 @@ def _run_comparison(tag, mask, comparator_prob, comparator_name):
     rows.append({'comparison': tag, 'model': comparator_name, 'n': n, 'n_pos': npos,
                  'auroc': ce_auroc, 'auroc_ci_lower': ce_a_ci[0], 'auroc_ci_upper': ce_a_ci[1],
                  'auprc': ce_auprc, 'auprc_ci_lower': ce_p_ci[0], 'auprc_ci_upper': ce_p_ci[1]})
-    # Add significance test result row
+    # DeLong row: p-value in auroc, z in auroc_ci_lower, AUROC diff in auroc_ci_upper
     rows.append({'comparison': f'{tag}_significance_test',
                  'model': f'SPARC-P_vs_{comparator_name}',
                  'n': n, 'n_pos': npos,
-                 'auroc': delong_pvalue,  # Store p-value in auroc column for convenience
-                 'auroc_ci_lower': delong_z,  # Store z-score in ci_lower column
-                 'auroc_ci_upper': sp_auroc - ce_auroc,  # Store AUROC difference
+                 'auroc': delong_pvalue,
+                 'auroc_ci_lower': delong_z,
+                 'auroc_ci_upper': sp_auroc - ce_auroc,
                  'auprc': None, 'auprc_ci_lower': None, 'auprc_ci_upper': None})
 
 
 _dran_label = 'Dranitsaris' if DRAN_INCLUDE_STEROID else 'Dranitsaris_4var'
 _dran_retrained_label = 'Dranitsaris_retrained' if DRAN_INCLUDE_STEROID else 'Dranitsaris_retrained_4var'
 
-# (a) first-cycle only (regenerated)
+# (a) first cycle only
 first_idx = int(ens_cycle_all.min())
 fc_mask = (ens_cycle_all == first_idx)
 print(f"\n\n=== FIRST CYCLE COMPARISON (cycle=={first_idx}) ===")
 _run_comparison(f'DRAN_firstcycle (cycle=={first_idx})', fc_mask, dran_prob_rows, _dran_label)
 _run_comparison(f'DRAN_retrained_firstcycle (cycle=={first_idx})', fc_mask, dran_retrained_probs, _dran_retrained_label)
 
-# (b) PATIENT-LEVEL EVER-POSITIVE (primary): both models per patient.
-#     Dranitsaris is a whole-course baseline model; SPARC-P aggregated by MAX risk.
+# (b) Patient-level ever-positive (primary); SPARC-P aggregated by max risk.
 patient_ids = np.unique(ens_dmp_all)
 pat_label, pat_sparc_max, pat_sparc_mean, pat_dran, pat_dran_retrained = [], [], [], [], []
 for d in patient_ids:
@@ -1157,7 +1053,6 @@ for d in patient_ids:
     pat_sparc_max.append(float(ens_pred_all[m].max()))
     pat_sparc_mean.append(float(ens_pred_all[m].mean()))
     pat_dran.append(dran_by_patient.get(d, {}).get('prob', np.nan))
-    # For retrained, get the prob for this patient from any row
     pat_dran_retrained.append(dran_retrained_probs[np.where(ens_dmp_all == d)[0][0]])
 
 pat_label = np.array(pat_label); pat_sparc_max = np.array(pat_sparc_max)
@@ -1179,7 +1074,6 @@ if n_pat > 0 and len(np.unique(_y)) >= 2:
     dr_ret_a_ci = _bootstrap_ci(_y, _dr_ret, 'auroc'); dr_ret_p_ci = _bootstrap_ci(_y, _dr_ret, 'auprc')
     spm_auroc = roc_auc_score(_y, pat_sparc_mean[_valid])
 
-    # DeLong tests for patient-level comparisons
     try:
         delong_orig = delong_roc_test(_y, _sp, _dr)
         delong_ret = delong_roc_test(_y, _sp, _dr_ret)
@@ -1211,7 +1105,6 @@ if n_pat > 0 and len(np.unique(_y)) >= 2:
                  'n': n_pat, 'n_pos': n_pos_pat,
                  'auroc': dr_ret_auroc, 'auroc_ci_lower': dr_ret_a_ci[0], 'auroc_ci_upper': dr_ret_a_ci[1],
                  'auprc': dr_ret_auprc, 'auprc_ci_lower': dr_ret_p_ci[0], 'auprc_ci_upper': dr_ret_p_ci[1]})
-    # Add significance test results for patient-level
     rows.append({'comparison': 'DRAN_patient_level_ever_positive_significance_test',
                  'model': f'SPARC-P_vs_{_dran_label}',
                  'n': n_pat, 'n_pos': n_pos_pat,
@@ -1229,7 +1122,7 @@ if n_pat > 0 and len(np.unique(_y)) >= 2:
 else:
     print("[WARN] single-class or empty at patient level; cannot compute AUROC.")
 
-# per-fold transparency
+# Per-fold first-cycle counts
 for f in all_folds:
     s = sparc_fold_store[f]
     fc = (s['cycle'] == first_idx)
@@ -1237,7 +1130,6 @@ for f in all_folds:
                  'n': int(fc.sum()), 'n_pos': int(s['label'][fc].sum()),
                  'auroc': None, 'auprc': None})
 
-# NOTE row
 rows.append({'comparison': 'NOTE', 'model':
              f'outcome=OUR_anemia_grade3_Hb<8 (MATCHES Dranitsaris endpoint); '
              f'dran_vars={DRAN_N_VARS}' + ('' if DRAN_INCLUDE_STEROID else ' (no steroid src)') +
@@ -1250,10 +1142,7 @@ rows.append({'comparison': 'NOTE', 'model':
 
 # Save
 _vartag = f'{DRAN_N_VARS}var'
-# Encode the actual cohort used (breast vs capecitabine) in the filename so the
-# two versions don't overwrite each other. 'both' runs the all_breast codepath,
-# so it writes the breast file (run --cohort_version capecitabine separately for
-# the second version).
+# Cohort in filename so versions don't overwrite; 'both' writes the allbreast file.
 _cohort_tag = {'all': 'allcancer', 'capecitabine': 'capecitabine'}.get(cohort_version, 'allbreast')
 save_name = (f'{results_path}/SPARC-P_vs_DRANITSARIS_anemia_FIXED_'
              f'{modules}_{dataset}_{caia_portion}_{_vartag}_{_cohort_tag}.csv')
@@ -1268,7 +1157,6 @@ audit_rows = []
 for d in np.unique(ens_dmp_all):
     info = dran_by_patient.get(d, {})
     f = info.get('feats', {})
-    # Get retrained prob
     idx = np.where(ens_dmp_all == d)[0][0]
     retrained_prob = dran_retrained_probs[idx]
     audit_rows.append({

@@ -1,21 +1,6 @@
-"""SPARC-P vs FENCE, febrile neutropenia, first cycle only.
-
-Task is locked to febrile_neutropenia and evaluation restricted to each
-patient's first chemotherapy cycle. Patients on weekly cisplatin are excluded,
-matching FENCE's own exclusion of the weekly-cisplatin + concomitant-RT group,
-where FN is not cycle-dependent.
-
-Two comparators: the FENCE nomogram, mapping our data onto its 8 predictors to
-produce both the integer score and the cycle-1 FN probability (the probability
-is used as the continuous score); and FENCE_retrained, logistic regression on
-the same features fit on train+val.
-
-SPARC-P first-cycle n / n_pos / metrics are taken from the existing CSV to
-avoid re-running inference; the first-cycle labels and FENCE scores are still
-computed here. Both models are scored on the same first-cycle patients with the
-same next-infusion FN labels, compared by AUROC and AUPRC.
-
-Output CSV: $SPARC_RESULTS_ROOT/eval_clinical_benchmarks
+"""SPARC-P vs FENCE (published nomogram and a train+val refit) for febrile
+neutropenia on each patient's first chemo cycle, weekly cisplatin excluded.
+Scored on the same patients and next-infusion FN labels (AUROC, AUPRC, DeLong).
 """
 
 import os
@@ -34,7 +19,7 @@ currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentfram
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir)
 
-# Put the repo root, data/ and models/ on sys.path, from any working directory.
+# put repo root, data/ and models/ on sys.path
 import os, sys
 _R = os.path.dirname(os.path.abspath(__file__))
 while _R != os.path.dirname(_R) and not all(
@@ -63,15 +48,14 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from delong_test import delong_roc_test
 
 
-# ============================  FENCE NOMOGRAM  ==============================
-# Integer point coefficients from Aagaard et al., JNCI Cancer Spectrum 2018
-# (Table 2, "Coefficient to use in FENCE score calculation"). Exact regression
-# coefficients (used for the probability formula) are kept separately below.
+# FENCE nomogram
+# Aagaard et al., JNCI Cancer Spectrum 2018, Table 2. Integer points give the
+# score / risk group; exact coefficients give the cycle-1 probability.
 
-FENCE_INTERCEPT = -7.561          # beta_0 (exact), for probability calculation
+FENCE_INTERCEPT = -7.561          # beta_0 (exact)
 FENCE_CYCLE_LENGTH_DAYS = 21      # t in the probability formula
 
-# --- Integer points (for the FENCE score / risk-group stratification) -------
+# Integer points
 FENCE_POINTS = {
     'sex':   {'male': 0, 'female': 8},
     'age':   {'<65': 0, '65-74': 9, '>=75': 4},
@@ -94,9 +78,7 @@ FENCE_POINTS = {
     },
 }
 
-# --- Exact regression coefficients (for the cycle-1 probability formula) -----
-# Only the levels that carry nonzero exact coefficients are listed; reference
-# levels are 0. Used to compute Prob(FN in cycle one).
+# Exact coefficients; reference levels are 0.
 FENCE_EXACT = {
     'sex':   {'male': 0.0, 'female': 0.327},
     'age':   {'<65': 0.0, '65-74': 0.351, '>=75': 0.154},
@@ -287,7 +269,6 @@ def fence_score_and_prob(feats):
     return score, prob
 
 
-# Build feature matrix for logistic regression
 def build_fence_feature_matrix(features_list):
     """Build one-hot encoded feature matrix for logistic regression."""
     X = []
@@ -385,19 +366,16 @@ def classes_for_drugs(drug_names, med_class_map):
     return len(chemo_names), classes
 
 
-# ===============================  ARG PARSE  ================================
-# Roots for the argparse defaults below; each is overridable by env var or by
-# the corresponding CLI flag. Results go to results_vis_060726_batch_091426 so
-# runs here do not overwrite results_vis_060726; reference CSVs are still read
-# from the original tree.
+# args
+# Default roots, overridable by env var or CLI flag.
 SPARC_DATA_ROOT = os.environ.get(
     'SPARC_DATA_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_data')
 SPARC_MODEL_ROOT = os.environ.get(
-    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/lilac_transfer_091126/SPARC_fixed_models_060726')
+    'SPARC_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426')
 SPARC_RESULTS_ROOT = os.environ.get(
-    'SPARC_RESULTS_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726_batch_091426')
+    'SPARC_RESULTS_ROOT', '/data1/morrisq/fuc/SPARC_CAIA_092426/results_vis_eval1_bfTrue')
 SPARC_REF_ROOT = os.environ.get(
-    'SPARC_REF_ROOT', f'{SPARC_MODEL_ROOT}/results_vis_060726')
+    'SPARC_REF_ROOT', '/nonexistent/no_bf_false_reference_row')
 
 parser = argparse.ArgumentParser(prog='eval_SPARC_P_vs_FENCE_first_cycle_FN_fixed')
 parser.add_argument("-r", "--rseed", type=int, default=1024)
@@ -413,14 +391,19 @@ parser.add_argument("-z", "--zeroshot", type=str, default='True')
 parser.add_argument("-mm", "--missing_mask", type=str, default="True")
 parser.add_argument("-en", "--ensemble", type=str, default='True')
 parser.add_argument("-dsp", "--data_source_path", type=str, default=f'{SPARC_DATA_ROOT}/')
-parser.add_argument("-mp", "--model_path", type=str, default=f'{SPARC_MODEL_ROOT}')
+parser.add_argument("-mp", "--model_path", type=str,
+                    default=os.environ.get('SPARC_EVAL7_MODEL_ROOT', '/data1/morrisq/fuc/SPARC_MSK_sparcp_bfTrue_092926'))
 parser.add_argument("-rp", "--results_path", type=str,
-                    default=f'{SPARC_RESULTS_ROOT}/eval_clinical_benchmarks')
+                    default=f'{SPARC_RESULTS_ROOT}/eval7_comparators_MSK_bfTrue')
 parser.add_argument("--existing_csv", type=str,
                     default=f'{SPARC_REF_ROOT}/'
                             'eval_across_models_valthresh_disabled/model_performance_dict_across_models_parsimonious_febrile_neutropenia_MSK_CAIA_ensemble.csv')
 parser.add_argument("--weekly_cisplatin_max_gap", type=int, default=10)
 parser.add_argument("--exclude_weekly_cisplatin", type=str, default='True')
+parser.add_argument("-bf", "--batch_first", type=str, default='True',
+                    help="True | False -- build SPARC with batch_first=True so the encoder "
+                         "attends over time. MUST match how the checkpoints were trained; "
+                         "a mismatch loads silently.")
 args = parser.parse_args()
 
 rseed = args.rseed
@@ -437,7 +420,7 @@ results_path = args.results_path
 existing_csv_path = args.existing_csv
 exclude_weekly_cisplatin = args.exclude_weekly_cisplatin.lower() == 'true'
 
-# LOCKED settings
+# Fixed for this analysis
 option = 'febrile_neutropenia'
 add_num_infusion = True
 
@@ -469,14 +452,15 @@ print("\n" + "="*80)
 print("GENERATING SPARC-P PREDICTIONS FOR DELONG TEST")
 print("="*80)
 
-# Model configuration
-model_type_suffix = 'hybrid'  # Febrile_neutropenia finetuned checkpoints use the 'hybrid' suffix
-sparc_p_folder = (f'{model_path}/{modules}_MSK_CAIA_060726/SPARC_finetuned_models/'
+model_type_suffix = 'hybrid'  # FN finetuned checkpoints use the 'hybrid' suffix
+# MSK -> MSK-finetuned SPARC-P; otherwise the MSK-CAIA models.
+_tree = f'{modules}_MSK_060726' if dataset == 'MSK' else f'{modules}_MSK_CAIA_060726'
+sparc_p_folder = (f'{model_path}/{_tree}/SPARC_finetuned_models/'
                   f'{modules}_finetuned_models_{model_type_suffix}_{option}_20tp_topchemos_att_modular')
 print("SPARC-P folder:", sparc_p_folder)
 all_folds = list(range(10))
 
-# Load data first to get modular_featuredim_dict (use base option name)
+# Load with the base option name to get modular_featuredim_dict
 print(f"Loading dataset from: {data_source_path}")
 data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option=option, modules=modules,
@@ -486,16 +470,14 @@ data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infu
 )
 print("Data loaded.")
 
-# Build module index config
 module_index_cfg = build_module_index_config(modular_featuredim_dict, advanced_model='default')
 n_static_features = module_index_cfg['n_static']
 
-# Set option suffix and model settings AFTER data loading, BEFORE data module init
-model_set_option = 'side_effects_risk'  # Model expects this format, not task name
+# _risk suffix goes on after load_dataset, before the DataModule
+model_set_option = 'side_effects_risk'  # model option, not the task name
 option = f'{option}_risk'  # febrile_neutropenia_risk
 anc_mode = True if 'CAIA' in dataset else False
 
-# Initialize data module (with _risk suffix in task)
 data_module = FlexibleFeatureDataModule(
     data_dict_lab_dict, split_dict, dataset=dataset, component=component,
     batch_size=batch_size, max_time_len=20, num_workers=1,
@@ -509,13 +491,11 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 sparc_fold_store = {}
 
 def first_cycle_mask(num_infusions_tensor):
-    """Boolean mask selecting the first cycle. Cycle indexing may be 0- or 1-based;
-    use the minimum present infusion index as 'first cycle'."""
+    """Mask for the first cycle (min infusion index; indexing may be 0- or 1-based)."""
     uniq = torch.unique(num_infusions_tensor)
     first_idx = uniq.min()
     return (num_infusions_tensor == first_idx), first_idx.item()
 
-# Generate predictions from each fold
 for val_fold in all_folds:
     print(f"\n=== SPARC-P fold {val_fold} ===")
     pl.seed_everything(rseed)
@@ -532,7 +512,8 @@ for val_fold in all_folds:
         module_index_cfg=module_index_cfg,
         use_module_tokenizer=use_module_tokenizer, use_continuous_time=use_continuous_time,
         n_static_features=n_static_features, post_mlp_dropout=post_mlp_dropout, lr=learning_rate,
-    ).to(device)
+    batch_first=(args.batch_first == 'True'),
+).to(device)
     model.eval()
 
     all_preds, all_events, all_ttes, all_infus, all_dmp = [], [], [], [], []
@@ -570,7 +551,7 @@ for val_fold in all_folds:
     all_infus = torch.cat(all_infus).numpy().ravel()
     all_dmp = np.array(all_dmp)
 
-    # ---- FIRST CYCLE filter ----
+    # First-cycle filter
     infus_t = torch.tensor(all_infus)
     fc_mask, first_idx = first_cycle_mask(infus_t)
     fc_mask = fc_mask.numpy()
@@ -589,9 +570,8 @@ for val_fold in all_folds:
     }
     print(f"Fold {val_fold}: {len(fc_preds)} first-cycle rows, {int(fc_label.sum())} next-infusion FN positives")
 
-# Build ensemble - align by DMP_ID across folds
+# Ensemble: mean over folds, aligned by DMP_ID
 print("\nBuilding SPARC-P first-cycle ensemble (aligned by patient) ...")
-# Reference patient set/labels from fold 0
 ref = sparc_fold_store[0]
 ref_label_by_dmp = {d: l for d, l in zip(ref['dmp'], ref['label'])}
 patients = list(ref_label_by_dmp.keys())
@@ -734,13 +714,13 @@ def build_fence_features(dmp_id, cutoff_date=None):
 
     cancer = map_ctype_to_fence(CTYPE_DICT.get(dmp_id))
 
-    # Stage: default to 'advanced' (most conservative)
+    # Stage not available; assume 'advanced'
     stage = 'advanced'
 
-    # Infection: default to 'no'
+    # Infection not available; assume 'no'
     infection = 'no'
 
-    # n_drugs and classes: from first-cycle drugs
+    # n_drugs and chemo classes from first-cycle drugs
     drug_sched = drugs_dict.get(dmp_id, {})
     first_cycle_drugs = set()
     if isinstance(drug_sched, dict):
@@ -813,7 +793,7 @@ print(f"FENCE scored {len(fence_by_patient)} patients. "
                 for g in ['low', 'intermediate', 'high', 'very_high']))
 
 
-# Extract first-cycle labels (lightweight, no model inference)
+# First-cycle labels
 print("\n=== Extracting first-cycle labels from test set (no SPARC-P inference) ===")
 pl.seed_everything(rseed)
 anc_mode = True if 'CAIA' in dataset else False
@@ -827,7 +807,6 @@ data_module = FlexibleFeatureDataModule(
     anc=anc_mode, test_shuffle=False)
 print("Data module initiated")
 
-# Extract labels by iterating test dataloader (lightweight)
 # First pass: find global first cycle index
 print("  First pass: finding global first cycle index...")
 all_num_inf = []
@@ -869,7 +848,6 @@ print(f"  Positives: {sum(first_cycle_labels_by_dmp.values())}")
 # Train FENCE_retrained model (logistic regression on train+val)
 print("\n=== Training FENCE_retrained logistic regression model (train+val combined) ===")
 
-# Load train+val data
 _, _, split_dict_trainval, _, _ = load_dataset(
     dataset=dataset, data_source_path=data_source_path, option='febrile_neutropenia',
     modules=modules, valfold=0, mode='train', rseed=rseed,
@@ -877,11 +855,9 @@ _, _, split_dict_trainval, _, _ = load_dataset(
     data_fraction_option='default', quick_test=False, caia_portion=caia_portion,
 )
 
-# Get both train and val patient IDs
 train_val_ids = list(split_dict_trainval['train']) + list(split_dict_trainval['val'])
 print(f"Combined train+val: {len(split_dict_trainval['train'])} train + {len(split_dict_trainval['val'])} val = {len(train_val_ids)} total patients")
 
-# Exclude weekly cisplatin if needed
 if exclude_weekly_cisplatin and drugs_dict:
     before = len(train_val_ids)
     excluded_train = [d for d in train_val_ids
@@ -889,14 +865,12 @@ if exclude_weekly_cisplatin and drugs_dict:
     train_val_ids = [d for d in train_val_ids if d not in set(excluded_train)]
     print(f"  Weekly-cisplatin exclusion: removed {before - len(train_val_ids)}")
 
-# Create combined split_dict
 split_dict_combined = {
     'train': train_val_ids,
     'val': [],
     'test': split_dict_trainval['test']
 }
 
-# Create data module for combined train+val
 data_module_combined = FlexibleFeatureDataModule(
     data_dict_lab_dict, split_dict_combined, dataset=dataset, component=component,
     batch_size=batch_size, max_time_len=20, num_workers=1,
@@ -945,13 +919,11 @@ for batch in data_module_combined.train_dataloader():
             label = 1 if (fail[i] == 1 and tte[i] == 1) else 0
             train_labels.append(label)
 
-# Build feature matrix
 X_train, feature_names = build_fence_feature_matrix(train_features_list)
 y_train = np.array(train_labels)
 
 print(f"Training samples: {len(y_train)} unique patients, {int(y_train.sum())} positives ({y_train.sum()/len(y_train):.2%})")
 
-# Fit logistic regression
 print("Fitting logistic regression model...")
 lr_model = LogisticRegression(random_state=rseed, max_iter=1000, class_weight='balanced', solver='lbfgs')
 lr_model.fit(X_train, y_train)
@@ -969,21 +941,19 @@ test_features_list = [fence_by_patient[d]['feats'] for d in test_patients_with_f
 X_test, _ = build_fence_feature_matrix(test_features_list)
 fence_retrained_probs_full = lr_model.predict_proba(X_test)[:, 1]
 
-# Map back to dictionary
 fence_retrained_probs_dict = dict(zip(test_patients_with_fence, fence_retrained_probs_full))
 print(f"FENCE_retrained predictions computed for {len(fence_retrained_probs_dict)} test patients")
 
 
-# Comparison: SPARC-P (from CSV), FENCE, FENCE_retrained
+# Comparison: SPARC-P, FENCE, FENCE_retrained
 print("\n=== Building comparison data ===")
 
-# Build patient-level dictionary for SPARC-P first-cycle predictions
 sparc_pred_by_dmp = {}
 for i, dmp in enumerate(sparc_first_cycle_dmp):
-    if dmp not in sparc_pred_by_dmp:  # Take first occurrence only
+    if dmp not in sparc_pred_by_dmp:  # first occurrence only
         sparc_pred_by_dmp[dmp] = sparc_first_cycle_preds[i]
 
-# Align all models to patients with FENCE scores AND first-cycle labels AND SPARC-P predictions
+# Keep patients with a first-cycle label, a FENCE score and a SPARC-P prediction
 ens_dmp = [d for d in first_cycle_labels_by_dmp.keys()
            if d in fence_by_patient and d in sparc_pred_by_dmp]
 ens_label = np.array([first_cycle_labels_by_dmp[d] for d in ens_dmp])
@@ -1022,7 +992,6 @@ rows = []
 
 # FENCE original
 if len(np.unique(ens_label_v)) == 2:
-    # Compute metrics on aligned cohort
     sp_auroc = roc_auc_score(ens_label_v, sparc_prob_v)
     sp_auprc = average_precision_score(ens_label_v, sparc_prob_v)
     sp_auroc_ci = _bootstrap_ci(ens_label_v, sparc_prob_v, 'auroc')
@@ -1102,7 +1071,7 @@ if len(np.unique(ens_label_v)) == 2:
         'auprc_ci_upper': fer_auprc_ci[1]
     })
 
-    # Add significance test result rows
+    # DeLong rows: auroc=p, auroc_ci_lower=z, auroc_ci_upper=AUROC diff
     rows.append({
         'model': 'SPARC-P_vs_FENCE_significance_test',
         'n': len(ens_label_v),
@@ -1129,7 +1098,6 @@ else:
     print("\n[WARN] First-cycle labels are single-class; cannot compute AUROC/AUPRC.")
 
 
-# Save
 _wc = '_exclWeeklyCis' if exclude_weekly_cisplatin else ''
 save_name = (f'{results_path}/SPARC-P_vs_FENCE_firstcycle_FN_FIXED_'
              f'{modules}_{dataset}_{caia_portion}{_wc}.csv')
