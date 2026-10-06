@@ -12,3 +12,11 @@ deprecated/
 local/
 RESULTS_INDEX.md
 code_cleaning_progress.md
+
+# package build, docs and test output
+*.egg-info/
+build/
+dist/
+site/
+.pytest_cache/
+.ruff_cache/

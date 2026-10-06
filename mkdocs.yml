@@ -1,0 +1,50 @@
+site_name: SPARC
+site_description: Longitudinal models that predict adverse events of cancer treatment
+site_url: https://tommyfuu.github.io/SPARC/
+repo_url: https://github.com/tommyfuu/SPARC
+repo_name: tommyfuu/SPARC
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src, data]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 3
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Input data: data.md
+  - Training and inference: training.md
+  - Python API: api.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.highlight
+  - pymdownx.superfences

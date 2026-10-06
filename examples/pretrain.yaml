@@ -1,0 +1,17 @@
+# Pretraining with the settings of the MSK-CAIA model in the paper.
+#   sparc train --config examples/pretrain.yaml -f 1
+dataset: MYSITE_CAIA            # folder under volume_path
+volume_path: /path/to/data
+output_model_path: /path/to/runs/pretrain
+
+scheme: pretrain
+option: pretrain
+modules_cat: parsimonious
+num_tp: 20
+time_processing: attention
+use_module_tokenizer: true
+use_continuous_time: true
+post_mlp_dropout: 0.2
+batch_first: true
+epochs: 300
+early_stop_patience: 50
