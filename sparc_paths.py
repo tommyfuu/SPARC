@@ -81,6 +81,11 @@ MIMIC_RAW_DIR = os.environ.get(
     'SPARC_MIMIC_RAW', os.path.join(os.path.dirname(os.path.normpath(DATA_ROOT)),
                                     'mimic_iv_3.1_mult', 'hosp'))
 
+# Raw Stanford EHRSHOT release (EHRSHOT_ASSETS), used only by data/EHRSHOT_preprocessing/.
+EHRSHOT_ASSETS_DIR = os.environ.get(
+    'SPARC_EHRSHOT_ASSETS', os.path.join(os.path.dirname(os.path.normpath(DATA_ROOT)),
+                                         'EHRSHOT_ASSETS'))
+
 # roots that no longer exist on this filesystem; kept configurable
 
 # eval_1, MIMICIV_hosp + XGBoost + -z False only (not reached by default)
@@ -124,6 +129,7 @@ def describe():
         ('BENCHMARK_CONFIG_DIR', BENCHMARK_CONFIG_DIR, 'SPARC_BENCHMARK_CONFIG_DIR'),
         ('GENOMIC_FT_CSV', GENOMIC_FT_CSV, 'SPARC_GENOMIC_FT'),
         ('MIMIC_RAW_DIR', MIMIC_RAW_DIR, 'SPARC_MIMIC_RAW'),
+        ('EHRSHOT_ASSETS_DIR', EHRSHOT_ASSETS_DIR, 'SPARC_EHRSHOT_ASSETS'),
         ('SL_TESTSL_ROOT', SL_TESTSL_ROOT, 'SPARC_SL_TESTSL_ROOT'),
         ('FROZEN_DATA_DIR', FROZEN_DATA_DIR, 'SPARC_FROZEN_DATA_DIR'),
         ('CTFM_DIR', CTFM_DIR, 'SPARC_CTFM_DIR'),

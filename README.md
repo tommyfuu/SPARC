@@ -18,7 +18,7 @@ synthetic data, training, inference and SLURM.
 
 ```
 sparc_paths.py          all filesystem roots, overridable by environment variable
-data/                   cohort loading and featurisation, plus MIMIC-IV preprocessing
+data/                   cohort loading and featurisation, plus MIMIC-IV and EHRSHOT preprocessing
 models/                 the SPARC model and the deep-learning benchmarks
 model_train/            training entry points
 hyperparam_tune/        benchmark hyperparameter search
@@ -58,6 +58,9 @@ order and each reads the previous one's output; see its own `README.md`.
 ```bash
 cd data/MIMICIV_preprocessing && python 1_extract_cancer_patients.py
 ```
+
+`data/EHRSHOT_preprocessing/` builds the Stanford EHRSHOT external-validation cohort the same
+way; see its own `README.md`.
 
 ## models/
 
@@ -172,3 +175,9 @@ python3 interp_fix_0622626/gcsf_analysis_090826/risk_wandwo_gcsf_usingdataloader
 python3 cohort_summaries/cv_analysis/cv_analysis_fixed.py
 python3 cohort_summaries/demographic_tables/dem_table_1_dataset_summaries.py
 ```
+
+## License
+
+This work is licensed under the [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0
+International License](https://creativecommons.org/licenses/by-nc-nd/4.0/) (CC BY-NC-ND 4.0).
+See [`LICENSE`](LICENSE).

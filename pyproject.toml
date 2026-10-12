@@ -7,6 +7,7 @@ name = "sparc-clinical"
 dynamic = ["version"]
 description = "SPARC: longitudinal models that predict adverse events of cancer treatment from routine labs and vitals."
 readme = "README.md"
+license = {text = "CC-BY-NC-ND-4.0"}
 requires-python = ">=3.9"
 dependencies = [
     "torch>=2.4",
