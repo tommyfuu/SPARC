@@ -86,6 +86,15 @@ EHRSHOT_ASSETS_DIR = os.environ.get(
     'SPARC_EHRSHOT_ASSETS', os.path.join(os.path.dirname(os.path.normpath(DATA_ROOT)),
                                          'EHRSHOT_ASSETS'))
 
+# INSIGHT external validation (external_validation_insight/): raw PCORnet CDM tables, processed per-site data
+# (A-F plus split/, from the INSIGHT preprocessing), and the root holding the INSIGHT result folders
+INSIGHT_RAW_DIR = os.environ.get(
+    'SPARC_INSIGHT_RAW_DIR', '/path/to/insight-data-raw')
+INSIGHT_DATA_DIR = os.environ.get(
+    'SPARC_INSIGHT_DATA_DIR', '/path/to/insight-processed')
+INSIGHT_RESULTS_DIR = os.environ.get(
+    'SPARC_INSIGHT_RESULTS_DIR', '/path/to/insight-results')
+
 # roots for rarely used scripts; kept configurable
 
 # eval_1, MIMICIV_hosp + XGBoost + -z False only (not reached by default)
@@ -130,6 +139,9 @@ def describe():
         ('GENOMIC_FT_CSV', GENOMIC_FT_CSV, 'SPARC_GENOMIC_FT'),
         ('MIMIC_RAW_DIR', MIMIC_RAW_DIR, 'SPARC_MIMIC_RAW'),
         ('EHRSHOT_ASSETS_DIR', EHRSHOT_ASSETS_DIR, 'SPARC_EHRSHOT_ASSETS'),
+        ('INSIGHT_RAW_DIR', INSIGHT_RAW_DIR, 'SPARC_INSIGHT_RAW_DIR'),
+        ('INSIGHT_DATA_DIR', INSIGHT_DATA_DIR, 'SPARC_INSIGHT_DATA_DIR'),
+        ('INSIGHT_RESULTS_DIR', INSIGHT_RESULTS_DIR, 'SPARC_INSIGHT_RESULTS_DIR'),
         ('SL_TESTSL_ROOT', SL_TESTSL_ROOT, 'SPARC_SL_TESTSL_ROOT'),
         ('FROZEN_DATA_DIR', FROZEN_DATA_DIR, 'SPARC_FROZEN_DATA_DIR'),
         ('CTFM_DIR', CTFM_DIR, 'SPARC_CTFM_DIR'),

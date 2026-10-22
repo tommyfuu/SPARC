@@ -89,12 +89,10 @@ def fetch_data_given_dates(dates, data_dict_lab_dict, DMP_ID, MSK_numfeature_dic
     # Pre-compute patient data for time series modules
     patient_module_data = {}
     for module in time_series_features:
-        # patient_module_data[module] = data_dict_lab_dict[module][DMP_ID]
-        # TODO: added 121925 -> if DMP_ID not in data_dict_lab_dict[module], set it to an empty dict
         if DMP_ID not in data_dict_lab_dict[module]:
             data_dict_lab_dict[module][DMP_ID] = {}
-        else:
-            patient_module_data[module] = data_dict_lab_dict[module][DMP_ID]
+        # always include the module, so a patient with no data for it gets NaN padding rather than fewer columns
+        patient_module_data[module] = data_dict_lab_dict[module][DMP_ID]
     
     if advanced_model == 'seft':
         return _process_seft_model(dates, patient_module_data, MSK_numfeature_dict, 
@@ -1376,6 +1374,7 @@ class FlexibleFeatureDataModule(pl.LightningDataModule):
                 include_gcsf = False, gcsf_lim = None, max_windows_per_patient = 3, meds_returned = False,
                 exclusion_med_l = None, regimen_analysis = False,
                 test_shuffle = True,
+                trim_test_last_batch = True,
                 **kwargs):
         super().__init__()
         print("TRYING SOMETHING OUTTTTT")
@@ -1569,7 +1568,8 @@ class FlexibleFeatureDataModule(pl.LightningDataModule):
 
         # Trim datasets if last batch would be too small (< 1/5 of batch_size)
         min_last_batch_size = self.batch_size // 5 if self.dataset not in ['MIMICIV_hosp', 'stanfordEHRSHOT'] else 2
-        for dataset_name in ['train_dataset', 'val_dataset', 'test_dataset']:
+        # trim_test_last_batch=False keeps every test sample (the INSIGHT evaluation, eval_insight.py)
+        for dataset_name in ['train_dataset', 'val_dataset'] + (['test_dataset'] if trim_test_last_batch else []):
             dataset = getattr(self, dataset_name)
             dataset_len = len(dataset)
             remainder = dataset_len % self.batch_size

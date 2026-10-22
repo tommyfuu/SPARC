@@ -40,8 +40,7 @@ export SPARC_RESULTS_PATH=/path/to/results
 ```
 
 Most scripts also take `-dsp`, `-mp` and `-rp`/`-op` to override the same roots per run.
-INSIGHT external-validation code and preprocessing: see the
-[`external-validation-insight` branch](https://github.com/tommyfuu/SPARC/tree/external-validation-insight).
+INSIGHT paths: see `external_validation_insight/preprocessing/README.md`.
 
 Defaults that are placeholders (`/path/to/...`) must be set before the script runs. The remaining
 variables, each read by the scripts named:
@@ -53,6 +52,8 @@ variables, each read by the scripts named:
 | `SPARC_RACE_ETHNICITY_DIR` | `cohort_summaries/demographic_tables/dem_table_3_harmonize_race_ethnicity.py` |
 | `SPARC_CANCER_TYPES_DIR`, `SPARC_CANCER_TYPES_OUT` | `cohort_summaries/cancer_types/ctypes_parse.py` |
 | `SPARC_MIMIC_RAW`, `SPARC_MIMIC_OUT` | `cohort_summaries/cancer_types/check_cancer_types_mimic.py` |
+| `SPARC_FONT_DIR` | `external_validation_insight/` plots (folder of Liberation Sans `.ttf` files; unset uses matplotlib's default font) |
+| `SPARC_INSIGHT_N_NUMBERS` | `external_validation_insight/auc_by_cohort.py` (`n_numbers.csv`; unset disables the minimum-cohort-size gate) |
 
 The two INSIGHT cancer-type scripts take their locations as required flags instead:
 

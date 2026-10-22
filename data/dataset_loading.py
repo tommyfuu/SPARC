@@ -73,12 +73,22 @@ def load_dataset(
 ):
     """Load, normalize and split one SPARC dataset (valfold 0-9; fold 10 is the held-out test set).
     Returns (data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates)."""
+    if dataset in ('insight', 'insight_pooled'):
+        # INSIGHT (PCORnet CDM) loading lives in external_validation_insight/insight_data.py
+        _ins = os.path.join(os.path.dirname(_THIS_DIR), 'external_validation_insight')
+        if _ins not in sys.path:
+            sys.path.insert(0, _ins)
+        from insight_data import load_insight
+        return load_insight(dataset, data_source_path, option, modules, mode, rseed=rseed,
+                            competing_risk_death_check=competing_risk_death_check,
+                            data_fraction_option=data_fraction_option, quick_test=quick_test,
+                            normalize=normalize, first_principle=first_principle)
     assert (
         dataset in ['MSK', 'MSK_timeshift', 'stanfordEHRSHOT', 'MIMICIV_hosp']
         or 'CAIA' in dataset
     ), (
         "dataset must be one of ['MSK', 'MSK_timeshift', 'stanfordEHRSHOT', "
-        "'MIMICIV_hosp'] or contain 'CAIA'"
+        "'MIMICIV_hosp', 'insight', 'insight_pooled'] or contain 'CAIA'"
     )
 
     data_modules_to_include, component = _resolve_modules(modules)
