@@ -1,0 +1,242 @@
+"""
+Count patients per first-mapped parent cancer type in each
+DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_<dataset>.pickle found under --pickle-dir.
+The pickles are produced by cancer_type_check_insight.py.
+
+Usage: python cancer_type_summary.py --pickle-dir /path/to/pickles [-od /path/to/reports]
+"""
+import argparse
+import fnmatch
+import os
+import pickle
+import re
+from collections import Counter
+
+# Filename pattern the auto-scan looks for.
+FILENAME_PATTERN = 'DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_*.pickle'
+
+# Everything before the dataset tag in that filename.
+FILENAME_PREFIX = 'DMP_ID_to_DATE_to_CANCER_TYPES_dict_delta_'
+
+# Write a ctypes_<TAG>_summary.txt report per pickle in addition to printing.
+WRITE_TXT = True
+
+# Where the .txt reports go (-od). None -> alongside each source pickle.
+OUTPUT_DIR = None
+
+# Name of each report. {tag} is derived from the pickle filename
+# ('insight_A' -> 'INSIGHT-A').
+TXT_NAME_TEMPLATE = 'ctypes_{tag}_summary.txt'
+
+# Set to True to also list every patient id grouped by cancer type.
+LIST_PATIENTS = False
+
+
+def find_cancer_types_pickles(scan_roots, pattern=FILENAME_PATTERN):
+    """Find all files matching `pattern` under scan_roots, de-duplicated by
+    real path and sorted by filename."""
+    found = {}
+    for root in scan_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fname in files:
+                if fnmatch.fnmatch(fname, pattern):
+                    path = os.path.join(dirpath, fname)
+                    found.setdefault(os.path.realpath(path), path)
+    return [found[k] for k in sorted(found, key=lambda p: os.path.basename(p))]
+
+
+def dataset_tag(pickle_path):
+    """'..._insight_A.pickle' -> 'INSIGHT-A'; other files keep their stem."""
+    stem = os.path.basename(pickle_path)
+    if stem.startswith(FILENAME_PREFIX):
+        stem = stem[len(FILENAME_PREFIX):]
+    stem = re.sub(r'\.pickle$', '', stem)
+    m = re.match(r'^insight[_-](.+)$', stem, flags=re.IGNORECASE)
+    if m:
+        return f'INSIGHT-{m.group(1).upper()}'
+    return stem
+
+
+
+def load_cancer_types_dict(pickle_path):
+    if not os.path.exists(pickle_path):
+        raise FileNotFoundError(
+            f'Cannot find: {pickle_path}\n'
+            'This file is produced by cancer_type_check_insight.py.')
+    with open(pickle_path, 'rb') as f:
+        return pickle.load(f)
+
+
+def summarize_first_cancer_types(cancer_types_dict):
+    """Tally patients by the parent cancer type(s) at their earliest day_delta.
+    single_type_counts counts same-day ties under each type; combined_label_counts
+    uses an "A + B" label so each patient is counted once."""
+    single_type_counts = Counter()
+    combined_label_counts = Counter()
+    patients_by_type = {}            # parent_cancer_type -> [pid, ...]
+    patients_by_combined_label = {}  # combined label -> [pid, ...]
+    n_patients_multi_first = 0
+
+    for pid, day_map in cancer_types_dict.items():
+        if not day_map:
+            continue
+        earliest_day = min(day_map.keys())
+        first_types = day_map[earliest_day]
+
+        # de-dup while preserving order, in case of any upstream duplicates
+        seen = set()
+        ordered_types = []
+        for t in first_types:
+            if t not in seen:
+                ordered_types.append(t)
+                seen.add(t)
+        if not ordered_types:
+            continue
+
+        for t in ordered_types:
+            single_type_counts[t] += 1
+            patients_by_type.setdefault(t, []).append(pid)
+
+        if len(ordered_types) > 1:
+            n_patients_multi_first += 1
+            label = ' + '.join(sorted(ordered_types))
+        else:
+            label = ordered_types[0]
+        combined_label_counts[label] += 1
+        patients_by_combined_label.setdefault(label, []).append(pid)
+
+    n_patients_total = sum(1 for _, d in cancer_types_dict.items() if d)
+    return (single_type_counts, combined_label_counts, n_patients_total,
+            n_patients_multi_first, patients_by_type, patients_by_combined_label)
+
+
+def print_patients_by_type(emit, patients_by_combined_label):
+    """Print every patient id grouped under its first-mapped cancer type
+    (combined label; each patient listed exactly once)."""
+    sep = '=' * 78
+    emit(f'\n{sep}')
+    emit('PATIENTS BY CANCER TYPE (first-mapped, one row per patient)')
+    emit(sep)
+    for label in sorted(patients_by_combined_label,
+                        key=lambda k: -len(patients_by_combined_label[k])):
+        pids = sorted(patients_by_combined_label[label])
+        emit(f'\n{label}  ({len(pids):,} patients)')
+        emit('-' * 78)
+        emit(', '.join(str(p) for p in pids))
+    emit(f'\n{sep}')
+
+
+def print_summary(emit, dataset_label, source_path, n_in_dict,
+                  single_type_counts, combined_label_counts,
+                  n_patients_total, n_patients_multi_first):
+    sep = '=' * 78
+    emit(sep)
+    emit(f'CANCER TYPE SUMMARY (first-mapped type) — {dataset_label}')
+    emit(sep)
+    emit(f'  Source: {source_path}')
+    emit(f'  Patients in dict: {n_in_dict:,}')
+    emit(f'  Total patients with >=1 mapped cancer type: {n_patients_total:,}')
+    emit(f'  Patients with >1 type tied for first appearance: '
+         f'{n_patients_multi_first:,}')
+    emit(sep)
+
+    emit(f'\n{"parent_cancer_type":<45} {"#patients":>10} {"% of cohort":>12}')
+    emit('-' * 78)
+    for cancer_type, n in single_type_counts.most_common():
+        pct = 100.0 * n / n_patients_total if n_patients_total else 0.0
+        emit(f'  {cancer_type:<43} {n:>10,} {pct:>11.2f}%')
+    emit('-' * 78)
+    emit(f'  {"TOTAL (sums >100% when ties exist)":<43} '
+         f'{sum(single_type_counts.values()):>10,}')
+    emit(sep)
+    emit('(Note: rows sum to more than total patients if any patient had '
+         'multiple cancer types tie for first appearance — see combined '
+         'labels below for a partition that counts each patient once.)')
+
+    emit(f'\n{sep}')
+    emit('CANCER TYPE SUMMARY (combined labels, one row per patient)')
+    emit(sep)
+    emit(f'{"label":<55} {"#patients":>10} {"% of cohort":>12}')
+    emit('-' * 78)
+    for label, n in combined_label_counts.most_common():
+        pct = 100.0 * n / n_patients_total if n_patients_total else 0.0
+        emit(f'  {label:<53} {n:>10,} {pct:>11.2f}%')
+    emit('-' * 78)
+    emit(f'  {"TOTAL":<53} {sum(combined_label_counts.values()):>10,}')
+    emit(sep)
+
+
+def process_one(pickle_path):
+    """Summarise a single pickle: print to stdout and, if enabled, write the
+    matching ctypes_<TAG>_summary.txt. Returns the report path, or None."""
+    lines = []
+
+    def emit(text=''):
+        print(text)
+        lines.append(text)
+
+    cancer_types_dict = load_cancer_types_dict(pickle_path)
+    tag = dataset_tag(pickle_path)
+
+    (single_type_counts, combined_label_counts, n_patients_total,
+     n_patients_multi_first, _patients_by_type,
+     patients_by_combined_label) = summarize_first_cancer_types(cancer_types_dict)
+
+    print_summary(emit, tag, pickle_path, len(cancer_types_dict),
+                  single_type_counts, combined_label_counts,
+                  n_patients_total, n_patients_multi_first)
+
+    if LIST_PATIENTS:
+        print_patients_by_type(emit, patients_by_combined_label)
+
+    if not WRITE_TXT:
+        return None
+
+    out_dir = OUTPUT_DIR or os.path.dirname(os.path.abspath(pickle_path))
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, TXT_NAME_TEMPLATE.format(tag=tag))
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'\n  -> wrote {out_path}')
+    return out_path
+
+
+def main():
+    global OUTPUT_DIR
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument('--pickle-dir', nargs='+', required=True,
+                    help=f'folder(s) searched recursively for "{FILENAME_PATTERN}"')
+    ap.add_argument('-od', '--output-dir', default=None,
+                    help='where the reports go (default: next to each pickle)')
+    args = ap.parse_args()
+    OUTPUT_DIR = args.output_dir
+
+    print(f'Scanning for "{FILENAME_PATTERN}" under: {args.pickle_dir}')
+    paths = find_cancer_types_pickles(args.pickle_dir)
+    if not paths:
+        raise FileNotFoundError(
+            f'Could not find any file matching "{FILENAME_PATTERN}" '
+            f'under {args.pickle_dir}.\n'
+            'These files are produced by cancer_type_check_insight.py.')
+    print(f'Found {len(paths)} pickle(s):')
+    for p in paths:
+        print(f'  {p}')
+
+    written = []
+    for path in paths:
+        out = process_one(path)
+        if out:
+            written.append(out)
+
+    if written:
+        print(f'\n{"=" * 78}')
+        print(f'Wrote {len(written)} report(s):')
+        for w in written:
+            print(f'  {w}')
+        print('=' * 78)
+
+
+if __name__ == '__main__':
+    main()

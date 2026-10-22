@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+
+# run output and local files
+logs/
+lightning_logs/
+out_*/
+*.bak_*
+*.sbatch
+*.lsf
+deprecated/
+local/
+RESULTS_INDEX.md
+code_cleaning_progress.md
+
+# package build, docs and test output
+*.egg-info/
+build/
+dist/
+site/
+.pytest_cache/
+.ruff_cache/

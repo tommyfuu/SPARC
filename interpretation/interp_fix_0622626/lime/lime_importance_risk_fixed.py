@@ -1,0 +1,948 @@
+"""LIME feature importance for SPARC side-effect risk models, averaged over the 10 CV folds.
+"""
+
+import os
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+import pickle
+import sys
+import inspect
+import re
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
+import matplotlib.pyplot as plt
+
+# put the repo root, data/ and models/ on sys.path
+import os, sys
+_R = os.path.dirname(os.path.abspath(__file__))
+while _R != os.path.dirname(_R) and not all(
+        os.path.isdir(os.path.join(_R, _d)) for _d in ('data', 'models')):
+    _R = os.path.dirname(_R)
+for _p in (_R, os.path.join(_R, 'data'), os.path.join(_R, 'models')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from MSK_featurename_list import (
+    BASIC_TESTS, BASIC_VITALS, EXTRA_TESTS, EXTRA_VITALS, CBC_DIFFERENTIAL_TESTS,
+    RBC_CBC_TESTS, BMP_TESTS, LFT_TESTS, build_module_index_config
+)
+
+currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+parentdir = os.path.dirname(currentdir)
+sys.path.insert(0, parentdir)
+
+
+import sparc_paths
+
+DEFAULT_DATA_SOURCE_PATH = sparc_paths.DATA_ROOT
+DEFAULT_MODEL_PATH = sparc_paths.SPARC_MODEL_ROOT
+
+# Arguments
+
+import argparse
+
+parser = argparse.ArgumentParser(
+    prog='lime_importance_risk_fixed',
+    description='Calculate and visualise LIME importance for SPARC risk models',
+    epilog='Text at the bottom of help')
+parser.add_argument('-r',  '--rseed',            type=int,   default=1024,      help='random seed')
+parser.add_argument('-o',  '--option',           type=str,   default='AKI',     help='task: AKI, anemia, neutropenia, febrile_neutropenia, Liver_toxicity')
+parser.add_argument('-d',  '--days',             type=int,   default=30,        help='number of days for binary classification tasks')
+parser.add_argument('-m',  '--modules',          type=str,   default='parsimonious', help='module category: practical, all')
+parser.add_argument('-ds', '--dataset',          type=str,   default='MSK_CAIA', help='dataset: MSK_CAIA, MSK')
+parser.add_argument('-me', '--med_of_choice',    type=str,   default='CISPLATIN', help='comma-separated medication(s) of choice')
+parser.add_argument('-an', '--add_num_infusion', type=str,   default='False',   help='whether to add number of infusion as a feature')
+parser.add_argument('-qt', '--quick_test',       action='store_true',           help='quick-test mode: fewer folds and small data subset')
+parser.add_argument('-ns', '--num_samples',      type=int,   default=2000,      help='LIME perturbation samples per instance (default 2000; original LIME default is 5000)')
+parser.add_argument('-nj', '--n_jobs',           type=int,   default=4,         help='parallel LIME workers via joblib threading (default 4)')
+parser.add_argument('-fs', '--fold_start',       type=int,   default=0,         help='first fold to process (inclusive); allows splitting folds across machines')
+parser.add_argument('-fe', '--fold_end',         type=int,   default=-1,        help='last fold to process (exclusive); -1 means process all folds')
+parser.add_argument('-dsp','--data_source_path', type=str, default=DEFAULT_DATA_SOURCE_PATH, help='root holding the per-dataset data volumes')
+parser.add_argument('-mp', '--all_model_path',   type=str, default=DEFAULT_MODEL_PATH,       help='root holding the 060726 SPARC checkpoints')
+parser.add_argument('-op', '--out_dir',          type=str, default=None,                      help='output dir (default: sparc_paths.SPARC_LIME_BF_DIR)')
+parser.add_argument('-bf', '--batch_first',      type=str, default='True',                    help='True | False -- build SPARC with batch_first=True so the encoder attends over time. MUST match how the checkpoints were trained; a mismatch loads silently.')
+parser.add_argument('-po', '--plot_only',        action='store_true',           help='skip LIME computation; load all existing per-fold pickles and re-plot')
+
+# e.g. python3 lime_importance_risk_fixed.py -o febrile_neutropenia -ds MSK_CAIA \
+#   -me "DOCETAXEL,SACITUZUMAB GOVITECAN,CISPLATIN,TOPOTECAN,IRINOTECAN,IRINOTECAN LIPOSOMAL,CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE,BENDAMUSTINE,CARBOPLATIN,ETOPOSIDE,CABAZITAXEL" \
+#   -an True --fold_start  9 --fold_end 10
+
+args = parser.parse_args()
+data_source_path = args.data_source_path
+all_model_path   = args.all_model_path
+out_dir          = args.out_dir or sparc_paths.SPARC_LIME_BF_DIR
+os.makedirs(out_dir, exist_ok=True)
+rseed            = args.rseed
+option           = args.option
+days             = args.days
+modules          = args.modules
+dataset          = args.dataset
+add_num_infusion = args.add_num_infusion.lower() == 'true'
+QUICK_TEST       = args.quick_test
+num_samples      = args.num_samples
+n_jobs           = args.n_jobs
+fold_start       = args.fold_start
+fold_end         = args.fold_end
+PLOT_ONLY        = args.plot_only
+
+# plot-only just needs the pickles, so skip the slow imports
+if not PLOT_ONLY:
+    from dataset_loading import load_dataset
+    from data_loaders_inf_risk_fixed import *
+    from MSK_featurename_list import BASIC_TESTS, BASIC_VITALS
+
+    from SPARC_inf_risk_modular import SPARC
+
+    import lime
+    from lime.lime_tabular import LimeTabularExplainer
+    from joblib import Parallel, delayed
+
+    import pytorch_lightning as pl
+    import torch
+
+
+NUM_FOLDS_QUICK_TEST = 2
+num_folds = NUM_FOLDS_QUICK_TEST if QUICK_TEST else 10
+
+# --fold_start/--fold_end split the work across jobs; --plot_only always uses all folds
+if PLOT_ONLY:
+    fold_range = range(0, num_folds)
+    print("PLOT_ONLY mode: will load all fold pickles and re-plot.")
+else:
+    _fold_end = num_folds if fold_end == -1 else fold_end
+    fold_range = range(fold_start, _fold_end)
+print(f"Processing folds: {list(fold_range)}")
+
+# med_of_choice -> list of lists ('+' joins a regimen)
+med_of_choice_raw = args.med_of_choice.split(',')
+med_of_choice_raw = [med.strip() for med in med_of_choice_raw]
+med_of_choice = []
+for med_str in med_of_choice_raw:
+    if '+' in med_str:
+        med_of_choice.append([m.strip() for m in med_str.split('+')])
+    else:
+        med_of_choice.append([med_str])
+print("med_of_choice:", med_of_choice)
+
+if QUICK_TEST:
+    print("\n" + "=" * 70)
+    print("QUICK TEST MODE ENABLED")
+    print(f"  - Using small data subset (quick_test=True in load_dataset)")
+    print(f"  - Processing only first {num_folds} model fold(s)")
+    print("=" * 70 + "\n")
+
+if not bool(re.match(
+        r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)(_next_risk|_risk)?$'
+        r'|^(binary|binary_icu_pre)$',
+        option)):
+    raise ValueError(
+        f"Invalid option '{option}'. Must be one of: "
+        "anemia, neutropenia, febrile_neutropenia, AKI, Liver_toxicity "
+        "(optionally with _risk or _next_risk suffix), binary, binary_icu_pre.")
+
+# model_set_option; bare side-effect names get the _risk suffix (as in eval_2)
+if option in ['binary', 'binary_icu_pre']:
+    model_set_option = 'binary'
+else:
+    model_set_option = 'side_effects_risk'
+    if bool(re.match(r'^(anemia|neutropenia|febrile_neutropenia|AKI|Liver_toxicity)$', option)):
+        option = f'{option}_risk'
+print(f"option (normalized): {option}, model_set_option: {model_set_option}")
+
+# Data loading and feature dims
+
+T_MAX = 20   # max_time_len
+
+if not PLOT_ONLY:
+    print("Loading dataset via dataset_loading.load_dataset()...")
+    data_dict_lab_dict, modular_featuredim_dict, split_dict, component, include_infusion_dates = load_dataset(
+        dataset=dataset,
+        data_source_path=data_source_path,
+        option=option,
+        modules=modules,
+        valfold=0,       # folds are looped over below
+        mode='train',    # train split gives the LIME background
+        rseed=rseed,
+        competing_risk_death_check=False,
+        include_gcsf=False,
+        data_fraction_option='default',
+        quick_test=QUICK_TEST,
+    )
+    print("modular_featuredim_dict:", modular_featuredim_dict)
+    print("Data loading complete.")
+
+    # feature layout: [0:base] values, [base] time stamp, [base+1:F_TOTAL-1] missingness,
+    # [F_TOTAL-1] padding
+    base_features = sum(modular_featuredim_dict.values())   # e.g. 32 for practical
+    F_TOTAL       = 2 * (base_features + 1) + 1             # e.g. 67 for practical
+    n_actual      = base_features + 1                       # features + time stamp
+    print(f"base_features={base_features}, F_TOTAL={F_TOTAL}, n_actual={n_actual}")
+else:
+    # infer dims from the fold-0 pickle (t{t}_f{f} columns, then num_infusion_*)
+    _first_pickle = f'{out_dir}/lime_df_val_fold_0_{option}_{dataset}.pickle'
+    if not os.path.exists(_first_pickle):
+        raise FileNotFoundError(
+            f"--plot_only requires existing fold pickles; not found: {_first_pickle}")
+    with open(_first_pickle, 'rb') as _fh:
+        _tmp_df = pickle.load(_fh)
+    _xs_col_count = sum(1 for c in _tmp_df.columns if re.match(r'^t\d+_f\d+$', c))
+    F_TOTAL       = _xs_col_count // T_MAX
+    base_features = (F_TOTAL - 3) // 2
+    n_actual      = base_features + 1
+    print(f"[plot_only] Inferred from pickle: base_features={base_features}, "
+          f"F_TOTAL={F_TOTAL}, n_actual={n_actual}")
+
+    # rebuild modular_featuredim_dict from --modules for the feature names
+    from MSK_featurename_list import MSK_numfeature_dict
+    modular_featuredim_dict = {}
+    modular_featuredim_dict['gender'] = MSK_numfeature_dict['gender']
+    modular_featuredim_dict['age'] = MSK_numfeature_dict['age']
+
+    if modules == 'practical':
+        modular_featuredim_dict['basic_lab'] = MSK_numfeature_dict['basic_lab']
+        modular_featuredim_dict['basic_vitals'] = MSK_numfeature_dict['basic_vitals']
+    elif modules == 'parsimonious':
+        modular_featuredim_dict['basic_lab'] = MSK_numfeature_dict['basic_lab']
+        modular_featuredim_dict['cbc_differential'] = MSK_numfeature_dict['cbc_differential']
+        modular_featuredim_dict['basic_vitals'] = MSK_numfeature_dict['basic_vitals']
+    elif modules == 'all':
+        modular_featuredim_dict['basic_lab'] = MSK_numfeature_dict['basic_lab']
+        modular_featuredim_dict['extra_lab'] = MSK_numfeature_dict['extra_lab']
+        modular_featuredim_dict['basic_vitals'] = MSK_numfeature_dict['basic_vitals']
+        modular_featuredim_dict['extra_vitals'] = MSK_numfeature_dict['extra_vitals']
+
+    print(f"[plot_only] Reconstructed modular_featuredim_dict: {modular_featuredim_dict}")
+
+# Feature names (features + time stamp), in the module order used by
+# data_loaders_inf_risk_fixed.py
+
+feature_names_with_time = ['gender', 'age at seq']
+
+if 'basic_lab' in modular_featuredim_dict:
+    feature_names_with_time.extend(BASIC_TESTS)
+if 'extra_lab' in modular_featuredim_dict:
+    feature_names_with_time.extend(EXTRA_TESTS)
+if 'cbc_differential' in modular_featuredim_dict:
+    feature_names_with_time.extend(CBC_DIFFERENTIAL_TESTS)
+if 'basic_vitals' in modular_featuredim_dict:
+    feature_names_with_time.extend(BASIC_VITALS)
+if 'extra_vitals' in modular_featuredim_dict:
+    feature_names_with_time.extend(EXTRA_VITALS)
+
+feature_names_with_time.append('time stamp')
+
+feature_names_without_time = feature_names_with_time[:-1]
+
+assert len(feature_names_with_time) == n_actual, (
+    f"feature_names length {len(feature_names_with_time)} != n_actual {n_actual}"
+)
+
+print(f"\nFeature names constructed for modules='{modules}':")
+print(f"  Static features (2): {feature_names_with_time[:2]}")
+time_series_start = 2
+for mod in ['basic_lab', 'extra_lab', 'cbc_differential', 'basic_vitals', 'extra_vitals']:
+    if mod in modular_featuredim_dict:
+        dim = modular_featuredim_dict[mod]
+        print(f"  {mod} ({dim}): {feature_names_with_time[time_series_start:time_series_start+dim]}")
+        time_series_start += dim
+print(f"  Time stamp: {feature_names_with_time[-1]}")
+
+# Plot order by clinical group: static, CBC, CBC differential, BMP, LFT, vitals, time stamp
+
+def create_plotting_order(feature_names_with_time):
+    """Feature names and indices in plotting order."""
+    plotting_order_names = ['gender', 'age at seq']
+
+    # CBC (RBC panel + WBC + platelets)
+    for test in RBC_CBC_TESTS:
+        if test in feature_names_with_time:
+            plotting_order_names.append(test)
+
+    # CBC differential, if present
+    if 'cbc_differential' in modular_featuredim_dict:
+        for test in CBC_DIFFERENTIAL_TESTS:
+            if test in feature_names_with_time:
+                plotting_order_names.append(test)
+
+    # BMP
+    for test in BMP_TESTS:
+        if test in feature_names_with_time:
+            plotting_order_names.append(test)
+
+    # LFT
+    for test in LFT_TESTS:
+        if test in feature_names_with_time:
+            plotting_order_names.append(test)
+
+    # vitals
+    for test in BASIC_VITALS:
+        if test in feature_names_with_time:
+            plotting_order_names.append(test)
+
+    # extra vitals, if present
+    if 'extra_vitals' in modular_featuredim_dict:
+        for test in EXTRA_VITALS:
+            if test in feature_names_with_time:
+                plotting_order_names.append(test)
+
+    # extra labs, if present
+    if 'extra_lab' in modular_featuredim_dict:
+        for test in EXTRA_TESTS:
+            if test in feature_names_with_time:
+                plotting_order_names.append(test)
+
+    # time stamp
+    plotting_order_names.append('time stamp')
+
+    plotting_indices = [feature_names_with_time.index(name) for name in plotting_order_names]
+
+    return plotting_order_names, plotting_indices
+
+feature_names_plotting_order, plotting_reorder_indices = create_plotting_order(feature_names_with_time)
+
+# Display names
+FEATURE_DISPLAY_NAMES = {
+    'gender': 'Gender',
+    'age at seq': 'Age',
+    # CBC
+    'RBC': 'RBC',
+    'MCV': 'MCV',
+    'MCH': 'MCH',
+    'MCHC': 'MCHC',
+    'RDW': 'RDW',
+    'HGB': 'HGB',
+    'HCT': 'HCT',
+    'WBC': 'WBC',
+    'Platelets': 'Platelets',
+    # CBC Differential
+    'Neut': 'Neutrophil',
+    'Mono': 'Monocytes',
+    'Lymph': 'Lymphocytes',
+    'Baso': 'Basophils',
+    'Eos': 'Eosinophils',
+    # BMP
+    'Glucose': 'Glucose',
+    'Calcium': 'Calcium',
+    'Sodium': 'Sodium',
+    'Potassium': 'Potassium',
+    'CO2': 'CO2',
+    'Creatinine': 'Creatinine',
+    'Chloride': 'Chloride',
+    'BUN': 'BUN',
+    # LFT
+    'Albumin': 'Albumin',
+    'Protein, Total': 'Protein, Total',
+    'ALP': 'ALP',
+    'ALT': 'ALT',
+    'AST': 'AST',
+    'Bilirubin, Total': 'Bilirubin, Total',
+    # Vitals
+    'BMI': 'BMI',
+    'Blood Pressure BP Systolic': 'Systolic BP',
+    'Blood Pressure Diastolic': 'Diastolic BP',
+    'O2': 'O2',
+    'Pulse Heart Rate': 'Pulse Hrt Rate',
+    'Resp Rate': 'Resp Rate',
+    'Temperature C': 'Temperature',
+    # Timestamp
+    'time stamp': 'Time Stamp',
+}
+
+feature_names_plotting_display = [FEATURE_DISPLAY_NAMES.get(name, name) for name in feature_names_plotting_order]
+
+# Label colours by clinical group
+def get_feature_colors(feature_names, modular_featuredim_dict):
+    """Colour per feature by clinical group (static grey, CBC red, CBC diff pink, BMP green,
+    LFT orange, vitals blue, time stamp black)."""
+    colors = []
+
+    for name in feature_names:
+        original_name = None
+        # display name -> original name
+        for orig, disp in FEATURE_DISPLAY_NAMES.items():
+            if disp == name:
+                original_name = orig
+                break
+        if original_name is None:
+            original_name = name
+
+        if original_name in ['gender', 'age at seq', 'Gender', 'Age']:
+            colors.append('#808080')
+        elif original_name in RBC_CBC_TESTS:
+            colors.append('#d62728')
+        elif original_name in CBC_DIFFERENTIAL_TESTS or name in ['Neutrophil', 'Monocytes', 'Lymphocytes', 'Basophils', 'Eosinophils']:
+            colors.append('#ff9896')
+        elif original_name in BMP_TESTS:
+            colors.append('#2ca02c')
+        elif original_name in LFT_TESTS:
+            colors.append('#ff7f0e')
+        elif original_name in BASIC_VITALS or name in ['Systolic BP', 'Diastolic BP', 'Pulse Hrt Rate']:
+            colors.append('#1f77b4')
+        elif original_name == 'time stamp' or name == 'Time Stamp':
+            colors.append('#000000')
+        else:
+            colors.append('#7f7f7f')
+
+    return colors
+
+feature_colors = get_feature_colors(feature_names_plotting_display, modular_featuredim_dict)
+
+print(f"\nPlotting order (clinical grouping):")
+print(f"  Static (2): {feature_names_plotting_display[:2]}")
+idx = 2
+print(f"  CBC ({len(RBC_CBC_TESTS)}): {feature_names_plotting_display[idx:idx+len(RBC_CBC_TESTS)]}")
+idx += len(RBC_CBC_TESTS)
+if 'cbc_differential' in modular_featuredim_dict:
+    print(f"  CBC Differential ({len(CBC_DIFFERENTIAL_TESTS)}): {feature_names_plotting_display[idx:idx+len(CBC_DIFFERENTIAL_TESTS)]}")
+    idx += len(CBC_DIFFERENTIAL_TESTS)
+print(f"  BMP ({len(BMP_TESTS)}): {feature_names_plotting_display[idx:idx+len(BMP_TESTS)]}")
+idx += len(BMP_TESTS)
+print(f"  LFT ({len(LFT_TESTS)}): {feature_names_plotting_display[idx:idx+len(LFT_TESTS)]}")
+idx += len(LFT_TESTS)
+print(f"  Vitals ({len(BASIC_VITALS)}): {feature_names_plotting_display[idx:idx+len(BASIC_VITALS)]}")
+idx += len(BASIC_VITALS)
+print(f"  Timestamp: {feature_names_plotting_display[-1]}")
+
+# Model path
+
+def get_model_folder(dataset, modules, option, val_fold):
+    """SPARC-P checkpoint folder for one fold."""
+    base_option = re.sub(r'_risk$|_next_risk$', '', option)
+
+    # hybrid_ for FN/N/anemia, risk_ for AKI/LT, none for binary
+    if base_option in ['febrile_neutropenia', 'neutropenia', 'anemia']:
+        task_prefix = 'hybrid_'
+    elif base_option in ['AKI', 'Liver_toxicity']:
+        task_prefix = 'risk_'
+    elif base_option in ['binary', 'binary_icu_pre']:
+        task_prefix = ''
+    else:
+        raise ValueError(f"Unknown task: {base_option}")
+
+    if 'CAIA' in dataset:
+        folder = (
+            f'{all_model_path}/{modules}_MSK_CAIA_060726/'
+            f'SPARC_finetuned_models/'
+            f'{modules}_finetuned_models_{task_prefix}{base_option}_20tp_topchemos_att_modular'
+            f'/fold{val_fold}'
+        )
+    else:
+        # MSK / MSK_timeshift
+        folder = (
+            f'{all_model_path}/{modules}_MSK_060726/'
+            f'SPARC_finetuned_models/'
+            f'{modules}_finetuned_models_{task_prefix}{base_option}_20tp_topchemos_att_modular'
+            f'/fold{val_fold}'
+        )
+    return folder
+
+# LIME
+
+def _explain_one(instance_vec, explainer, lime_wrapper, flat_feature_names, num_samples):
+    """LIME weights for one flattened test instance."""
+    exp = explainer.explain_instance(
+        instance_vec,
+        lime_wrapper.predict,
+        num_features=len(flat_feature_names),
+        num_samples=num_samples,
+    )
+    contrib_dict = dict(exp.as_list())
+    return [contrib_dict.get(name, 0.0) for name in flat_feature_names]
+
+# LIME per fold
+
+across_folds_lime_values      = []   # [num_folds, T, n_actual], signed mean over instances
+across_folds_lime_abs         = []   # [num_folds, T, n_actual], mean of |LIME|
+across_folds_lime_miss        = []   # [num_folds, T, base_features], signed, missingness indicators
+across_folds_lime_miss_abs    = []   # [num_folds, T, base_features], mean of |LIME|, missingness indicators
+num_infusion_values           = []   # [num_folds, num_infusion_dim]
+
+for val_fold in fold_range:
+    print(f"\n{'='*60}")
+    print(f"FOLD {val_fold}/{num_folds - 1}")
+    print(f"{'='*60}")
+
+    # reuse the fold pickle if it exists
+    pickle_path = f'{out_dir}/lime_df_val_fold_{val_fold}_{option}_{dataset}.pickle'
+    if os.path.exists(pickle_path):
+        print(f"  Loading cached results from {pickle_path}")
+        with open(pickle_path, 'rb') as fh:
+            lime_df = pickle.load(fh)
+    elif PLOT_ONLY:
+        continue
+    else:
+        pl.seed_everything(rseed)
+        advanced_model = 'default'
+
+        # include_infusion_dates comes from load_dataset (True for side-effect tasks);
+        # add_num_infusion only controls whether num_infusion is in the LIME output
+        data_module = FlexibleFeatureDataModule(
+            data_dict_lab_dict, split_dict,
+            dataset=dataset, component=component,
+            batch_size=512, max_time_len=20, num_workers=1,
+            task=option, binary_days=days,
+            med=med_of_choice, med_as_feature=False, med_l=med_of_choice,
+            advanced_model=advanced_model,
+            control_lack_confounds=False,
+            side_effect_censoring=False,
+            include_infusion_dates=include_infusion_dates,
+            premed_only=False,
+            competing_risk_death_check=False,
+            anc=('CAIA' in dataset),
+        )
+        print("  Data module initialised.")
+
+        model_folder = get_model_folder(dataset, modules, option, val_fold)
+        print(f"  Model folder: {model_folder}")
+        existing_files = os.listdir(model_folder)
+        ckpt_name = [f for f in existing_files if 'epoch' in f][0]
+        optimal_model_path = os.path.join(model_folder, ckpt_name)
+        print(f"  Checkpoint: {optimal_model_path}")
+
+        # 060726 model config
+        use_module_tokenizer = True
+        use_continuous_time = True
+        post_mlp_dropout = 0.2
+
+        module_index_cfg = build_module_index_config(
+            modular_featuredim_dict, advanced_model='default'
+        )
+        n_static_features = module_index_cfg['n_static']
+
+        base_option = re.sub(r'_risk$|_next_risk$', '', option)
+        if base_option in ['febrile_neutropenia', 'neutropenia', 'anemia']:
+            loss_option = 'hybrid'  # Cox + BCE
+        else:
+            loss_option = 'default'  # Cox only
+
+        model = SPARC.load_from_checkpoint(
+            optimal_model_path,
+            modular_featuredim_dict=modular_featuredim_dict,
+            option=model_set_option,
+            advanced_model='default',
+            max_time_len=20,
+            med_as_feature=False,
+            meds_l=med_of_choice,
+            loss_option=loss_option,
+            side_effects_num_infusion=include_infusion_dates,
+            temporal_aggregation='attention',
+            missing_mask=True,
+            module_index_cfg=module_index_cfg,
+            use_module_tokenizer=use_module_tokenizer,
+            use_continuous_time=use_continuous_time,
+            n_static_features=n_static_features,
+            post_mlp_dropout=post_mlp_dropout,
+            batch_first=(args.batch_first == 'True'),
+        )
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        model.eval()
+        print(f"  Model on device: {device}")
+
+        # LIME background: one training batch
+        train_batch = next(iter(data_module.train_dataloader()))
+        train_xs, train_y, train_mask, _, num_infusion, _DMP_IDs = model.data_prep(
+            train_batch, time_calibration=model.time_calibration
+        )
+        train_xs = train_xs.to(device)
+
+        T, F = train_xs.shape[1], train_xs.shape[2]
+        assert T == T_MAX and F == F_TOTAL, (
+            f"Unexpected xs shape: got T={T}, F={F}; expected T_MAX={T_MAX}, F_TOTAL={F_TOTAL}")
+
+        train_data_xs = train_xs.cpu().numpy().reshape(train_xs.shape[0], -1)  # [N, T*F]
+        if num_infusion is not None:
+            train_data_ni = num_infusion.cpu().numpy()
+            if train_data_ni.ndim == 1:
+                train_data_ni = train_data_ni.reshape(-1, 1)
+        else:
+            train_data_ni = np.zeros((train_data_xs.shape[0], 1))
+        num_infusion_dim = train_data_ni.shape[1]
+
+        train_data_np = np.concatenate([train_data_xs, train_data_ni], axis=1)
+
+        class LimeModelWrapper:
+            def __init__(self, model, T, F, num_infusion_dim, device):
+                self.model = model
+                self.T = T
+                self.F = F
+                self.num_infusion_dim = num_infusion_dim
+                self.device = device
+
+            def predict(self, flat_inputs):
+                """[B, T*F + num_infusion_dim] -> class probabilities [B, 2]."""
+                xs_flat      = flat_inputs[:, :self.T * self.F]
+                ni_flat      = flat_inputs[:, self.T * self.F:]
+
+                xs = torch.tensor(xs_flat, dtype=torch.float32).reshape(-1, self.T, self.F).to(self.device)
+                ni = torch.tensor(ni_flat.squeeze(), dtype=torch.float32).to(self.device)
+
+                mask = torch.zeros(xs.size(0), self.T).bool().to(self.device).T  # [T, B]
+
+                with torch.no_grad():
+                    logits = self.model(xs, src_key_padding_mask=mask, num_infusion=ni)
+                    probs  = torch.sigmoid(logits).cpu().numpy().flatten()
+                    probs  = np.stack([1 - probs, probs], axis=1)
+                return probs
+
+        lime_wrapper = LimeModelWrapper(model, T, F, num_infusion_dim, device)
+
+        flat_feature_names = [f"t{t}_f{f}" for t in range(T) for f in range(F)]
+        flat_feature_names += [f"num_infusion_{i}" for i in range(num_infusion_dim)]
+
+        explainer = LimeTabularExplainer(
+            training_data=train_data_np,
+            mode='classification',
+            feature_names=flat_feature_names,
+            discretize_continuous=False,
+        )
+
+        # all test instances, flattened
+        all_test_instances = []
+        for idx, batch in enumerate(data_module.test_dataloader()):
+            print(f"    Preparing test batch {idx + 1}/{len(data_module.test_dataloader())}", end='\r')
+            test_xs, _y, _mask, _, ni_test, _DMP = model.data_prep(
+                batch, time_calibration=model.time_calibration
+            )
+            test_xs = test_xs.to(device)
+            xs_np = test_xs.cpu().numpy().reshape(test_xs.shape[0], -1)
+            if ni_test is not None:
+                ni_np = ni_test.cpu().numpy()
+                if ni_np.ndim == 1:
+                    ni_np = ni_np.reshape(-1, 1)
+            else:
+                ni_np = np.zeros((xs_np.shape[0], 1))
+            all_test_instances.append(np.concatenate([xs_np, ni_np], axis=1))
+
+        all_test_instances = np.vstack(all_test_instances)
+
+        print(f"\n  Total test instances: {all_test_instances.shape[0]}")
+
+        # joblib threads (fine with CUDA, torch releases the GIL). Results are flushed to a
+        # .partial pickle every CHECKPOINT_EVERY instances and resumed from on the next run.
+        n_instances = all_test_instances.shape[0]
+        CHECKPOINT_EVERY = 500
+        checkpoint_path = pickle_path + '.partial'
+
+        start_idx = 0
+        results = []
+        if os.path.exists(checkpoint_path):
+            with open(checkpoint_path, 'rb') as fh:
+                results = pickle.load(fh)
+            start_idx = len(results)
+            print(f"  Resuming from checkpoint: {start_idx}/{n_instances} already done.")
+
+        print(f"  Running LIME on {n_instances - start_idx} remaining instances "
+              f"(n_jobs={n_jobs}, num_samples={num_samples})...")
+
+        for chunk_start in range(start_idx, n_instances, CHECKPOINT_EVERY):
+            chunk_end = min(chunk_start + CHECKPOINT_EVERY, n_instances)
+            chunk = Parallel(n_jobs=n_jobs, backend='threading', verbose=5)(
+                delayed(_explain_one)(
+                    all_test_instances[i], explainer, lime_wrapper,
+                    flat_feature_names, num_samples,
+                )
+                for i in range(chunk_start, chunk_end)
+            )
+            results.extend(chunk)
+            with open(checkpoint_path, 'wb') as fh:
+                pickle.dump(results, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"  Checkpoint saved: {len(results)}/{n_instances} done.")
+
+        lime_df = pd.DataFrame(results, columns=flat_feature_names)
+        print(f"  lime_df shape: {lime_df.shape}")
+
+        with open(pickle_path, 'wb') as fh:
+            pickle.dump(lime_df, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
+        print(f"  Saved: {pickle_path}")
+
+    print(f"  Test instances (fold {val_fold}): {lime_df.shape[0]} total")
+
+    # per-fold averages; lime_df has T_MAX*F_TOTAL feature columns, then num_infusion
+    lime_xs_vals = lime_df.iloc[:, :T_MAX * F_TOTAL].values.reshape(-1, T_MAX, F_TOTAL)  # [N, T, F_TOTAL]
+    lime_ni_vals = lime_df.iloc[:, T_MAX * F_TOTAL:].values                               # [N, num_infusion_dim]
+
+    # keep features + time stamp, drop missingness and padding columns
+    lime_xs_actual = lime_xs_vals[:, :, :n_actual]                                        # [N, T, n_actual]
+
+    lime_signed_xs = lime_xs_actual.mean(axis=0)                                          # [T, n_actual]
+    # missingness indicators of the base features (time-stamp indicator and padding left out)
+    lime_xs_miss = lime_xs_vals[:, :, n_actual:n_actual + base_features]                  # [N, T, base_features]
+    across_folds_lime_miss.append(lime_xs_miss.mean(axis=0))
+    across_folds_lime_miss_abs.append(np.abs(lime_xs_miss).mean(axis=0))
+    lime_abs_xs    = np.abs(lime_xs_actual).mean(axis=0)                                  # [T, n_actual]
+    lime_avg_ni    = lime_ni_vals.mean(axis=0)                                            # [num_infusion_dim]
+
+    across_folds_lime_values.append(lime_signed_xs)
+    across_folds_lime_abs.append(lime_abs_xs)
+    num_infusion_values.append(lime_avg_ni)
+
+# Aggregate across folds
+
+across_folds_lime_values = np.array(across_folds_lime_values)  # [num_folds, T, n_actual], signed
+across_folds_lime_abs    = np.array(across_folds_lime_abs)     # [num_folds, T, n_actual], abs-then-mean
+
+# Main heatmap is signed. Time/Feature importance default to |mean over instances|, so
+# per-instance noise cancels; SPARC_LIME_IMPORTANCE=abs_then_mean averages |LIME| instead.
+LIME_IMPORTANCE = os.environ.get('SPARC_LIME_IMPORTANCE', 'mean_then_abs')
+across_folds_lime_miss     = np.array(across_folds_lime_miss)       # [num_folds, T, base_features], signed
+across_folds_lime_miss_abs = np.array(across_folds_lime_miss_abs)
+if LIME_IMPORTANCE == 'mean_then_abs':
+    across_folds_lime_abs = np.abs(across_folds_lime_values)
+    across_folds_lime_miss_abs = np.abs(across_folds_lime_miss)
+print(f"Time/Feature importance: {LIME_IMPORTANCE}")
+lime_values_avg      = across_folds_lime_values.mean(axis=0)                          # [T, n_actual]
+lime_values_avg_T    = across_folds_lime_abs.mean(axis=(0, 2))                        # [T]
+# feature importance: average over timepoints weighted by time importance
+_abs_avg_folds       = across_folds_lime_abs.mean(axis=0)                             # [T, n_actual]
+lime_values_avg_F    = np.average(_abs_avg_folds, axis=0, weights=lime_values_avg_T)  # [n_actual]
+
+# Without time stamp (last column)
+lime_values_wotime   = across_folds_lime_values[:, :, :-1]                            # [num_folds, T, base_features], signed
+lime_values_avg_wt   = lime_values_wotime.mean(axis=0)                                # [T, base_features]
+lime_abs_wotime      = across_folds_lime_abs[:, :, :-1]                               # [num_folds, T, base_features], abs-then-mean
+lime_values_avg_T_wt = lime_abs_wotime.mean(axis=(0, 2))                              # [T]
+_abs_avg_folds_wt    = lime_abs_wotime.mean(axis=0)                                   # [T, base_features]
+lime_values_avg_F_wt = np.average(_abs_avg_folds_wt, axis=0, weights=lime_values_avg_T_wt)  # [base_features]
+
+avg_num_infusion = np.mean(num_infusion_values)
+
+# Plots
+
+def plot_lime_values(
+    lime_values_avg,
+    lime_values_avg_F,
+    lime_values_avg_T,
+    feat_names,
+    num_infusion_val,
+    save_path,
+    n_folds_used,
+    title_suffix='',
+    num_infusion_included=False,
+    feat_colors=None,
+    block_split=None,
+):
+    """Signed LIME heatmap (time x feature) with time importance on the left, feature
+    importance below, and a colourbar."""
+    import matplotlib.gridspec as gridspec
+    import matplotlib.patches as mpatches
+
+    if num_infusion_included:
+        T_dim, F_dim = lime_values_avg.shape
+        lime_ext = np.full((T_dim, F_dim + 1), np.nan)
+        lime_ext[:, :-1] = lime_values_avg
+        lime_ext[0, -1] = 0.0   # neutral colour for the num_infusion cell
+        feat_names_ext = list(feat_names) + ['num_infusion']
+        lime_F_ext = np.append(lime_values_avg_F, np.nan)
+        lime_plot  = lime_ext
+        feat_plot  = feat_names_ext
+        lime_F_plot = lime_F_ext
+    else:
+        lime_plot  = lime_values_avg
+        feat_plot  = feat_names
+        lime_F_plot = lime_values_avg_F
+
+    abs_max = np.nanmax(np.abs(lime_plot))
+    vmin, vmax = -abs_max, abs_max
+
+    n_t = lime_plot.shape[0]
+    n_f = lime_plot.shape[1]
+
+    fig = plt.figure(figsize=(16 if block_split is None else 24, 10))
+    gs = gridspec.GridSpec(
+        2, 3,
+        width_ratios=[0.5, 20, 1],
+        height_ratios=[20, 1],
+        wspace=0.05,
+        hspace=0.05,
+    )
+    ax_left = fig.add_subplot(gs[0, 0])
+    ax_main = fig.add_subplot(gs[0, 1])
+    ax_bot  = fig.add_subplot(gs[1, 1])
+    cax     = fig.add_subplot(gs[0, 2])
+
+    # Time importance (left). All panels use pcolormesh so the PDF stays vector.
+    t_arr = np.asarray(lime_values_avg_T).reshape(-1, 1)
+    tv = float(np.nanmax(t_arr)) or 1.0
+    # SPARC_LIME_IMP_VMIN=min starts the grey scale at the minimum instead of 0 (display only)
+    _stretch = os.environ.get('SPARC_LIME_IMP_VMIN', '0') == 'min'
+    ax_left.pcolormesh(
+        np.arange(2), np.arange(len(t_arr) + 1),
+        t_arr, cmap='Greys', vmin=float(np.nanmin(t_arr)) if _stretch else 0, vmax=tv,
+        shading='flat', edgecolors='none', rasterized=False,
+    )
+    ax_left.invert_yaxis()
+    ax_left.set_yticks(np.arange(len(t_arr)) + 0.5)
+    ax_left.set_yticklabels(range(len(t_arr)))
+    ax_left.set_xticks([])
+    ax_left.set_title('Time\nImportance', fontsize=10)
+    ax_left.tick_params(left=False)
+
+    # Main heatmap
+    im0 = ax_main.pcolormesh(
+        np.arange(n_f + 1), np.arange(n_t + 1),
+        lime_plot, cmap='coolwarm', vmin=vmin, vmax=vmax,
+        shading='flat', edgecolors='none', rasterized=False,
+    )
+    ax_main.invert_yaxis()
+    title = f'LIME values (avg across {n_folds_used} folds, all patients){title_suffix}'
+    ax_main.set_title(title, fontsize=11)
+    ax_main.set_xticks([])
+    ax_main.set_yticks([])
+    ax_main.set_xlim(0, n_f)
+
+    if block_split is not None:
+        # values | missingness indicators
+        ax_main.axvline(block_split, color='black', linewidth=1.5)
+        _xt = ax_main.get_xaxis_transform()     # x in data, y in axes coordinates
+        ax_main.text(block_split / 2, 1.01, 'Feature values', transform=_xt, ha='center', va='bottom',
+                     fontsize=10, fontweight='bold')
+        ax_main.text((block_split + n_f) / 2, 1.01, 'Measured or not (missingness indicators)', transform=_xt,
+                     ha='center', va='bottom', fontsize=10, fontweight='bold')
+        ax_main.set_title(title, fontsize=11, pad=24)
+
+    if num_infusion_included:
+        F_orig = lime_values_avg.shape[1]
+        rect = mpatches.Rectangle(
+            (F_orig, 0), 1, 1,
+            linewidth=2, edgecolor='black', facecolor='none', linestyle='--')
+        ax_main.add_patch(rect)
+
+    # Feature importance (bottom)
+    f_row = np.asarray(lime_F_plot).reshape(1, -1)
+    fv = float(np.nanmax(f_row)) or 1.0
+    ax_bot.pcolormesh(
+        np.arange(n_f + 1), np.arange(2),
+        f_row, cmap='Greys', vmin=float(np.nanmin(f_row)) if _stretch else 0, vmax=fv,
+        shading='flat', edgecolors='none', rasterized=False,
+    )
+    ax_bot.set_ylim(1, 0)
+    ax_bot.set_yticks([0.5])
+    ax_bot.set_yticklabels(['Feature\nImportance'])
+    ax_bot.set_xticks(np.arange(len(feat_plot)) + 0.5)
+    ax_bot.set_xticklabels(feat_plot, rotation=45, ha='right', fontsize=8)
+
+    # colour x labels
+    if feat_colors is not None:
+        for tick_label, color in zip(ax_bot.get_xticklabels(), feat_colors):
+            tick_label.set_color(color)
+            tick_label.set_weight('bold')
+
+    ax_bot.set_xlim(0, n_f)
+    ax_bot.tick_params(axis='y', which='both', length=0)
+    if block_split is not None:
+        ax_bot.axvline(block_split, color='black', linewidth=1.5)
+
+    plt.colorbar(im0, cax=cax)
+    fig.subplots_adjust(bottom=0.25)
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved plot: {save_path}")
+
+
+n_folds_used = len(across_folds_lime_values)
+
+# Reorder features into clinical groups
+print("\nApplying clinical grouping reordering for plots...")
+
+lime_values_avg_reordered = lime_values_avg[:, plotting_reorder_indices]
+lime_values_avg_F_reordered = lime_values_avg_F[plotting_reorder_indices]
+
+# without time stamp
+plotting_reorder_indices_wt = [i for i in plotting_reorder_indices if i < len(feature_names_without_time)]
+lime_values_avg_wt_reordered = lime_values_avg_wt[:, plotting_reorder_indices_wt]
+lime_values_avg_F_wt_reordered = lime_values_avg_F_wt[plotting_reorder_indices_wt]
+feature_names_plotting_display_wt = [feature_names_plotting_display[i] for i in range(len(feature_names_plotting_display)) if feature_names_plotting_display[i] != 'Time Stamp']
+feature_colors_wt = [feature_colors[i] for i in range(len(feature_colors)) if feature_names_plotting_display[i] != 'Time Stamp']
+
+# Export the feature-importance vectors shown in the bottom panels
+import pandas as _pd
+_imp = _pd.DataFrame({'feature': list(feature_names_plotting_display),
+                      'importance_with_time': np.asarray(lime_values_avg_F_reordered, dtype=float)})
+_imp_wt = dict(zip(feature_names_plotting_display_wt, np.asarray(lime_values_avg_F_wt_reordered, dtype=float)))
+_imp['importance_no_time'] = _imp['feature'].map(_imp_wt)
+_imp['rank_with_time'] = _imp['importance_with_time'].rank(ascending=False, method='min').astype(int)
+_imp['rank_no_time'] = _imp['importance_no_time'].rank(ascending=False, method='min')
+_imp['importance_mode'] = LIME_IMPORTANCE
+_imp.to_csv(f'{out_dir}/lime_feature_importance_{option}_{dataset}.csv', index=False)
+print(f"Saved feature importance: {out_dir}/lime_feature_importance_{option}_{dataset}.csv")
+
+# Plot with time stamp
+plot_lime_values(
+    lime_values_avg_reordered, lime_values_avg_F_reordered, lime_values_avg_T,
+    feat_names=feature_names_plotting_display,
+    num_infusion_val=avg_num_infusion,
+    save_path=f'{out_dir}/lime_values_{option}_{dataset}.pdf',
+    n_folds_used=n_folds_used,
+    title_suffix='',
+    num_infusion_included=add_num_infusion,
+    feat_colors=feature_colors,
+)
+
+# Plot without time stamp
+plot_lime_values(
+    lime_values_avg_wt_reordered, lime_values_avg_F_wt_reordered, lime_values_avg_T_wt,
+    feat_names=feature_names_plotting_display_wt,
+    num_infusion_val=avg_num_infusion,
+    save_path=f'{out_dir}/lime_values_{option}_{dataset}_remove_time.pdf',
+    n_folds_used=n_folds_used,
+    title_suffix=' [no timestamp]',
+    num_infusion_included=add_num_infusion,
+    feat_colors=feature_colors_wt,
+)
+
+# Time-series features only (no gender, age or time stamp)
+ts_indices = [i for i in range(len(feature_names_plotting_display)) if feature_names_plotting_display[i] not in ['Gender', 'Age', 'Time Stamp']]
+lime_values_avg_ts_reordered = lime_values_avg_reordered[:, ts_indices]
+lime_values_avg_F_ts_reordered = lime_values_avg_F_reordered[ts_indices]
+feature_names_ts_display = [feature_names_plotting_display[i] for i in ts_indices]
+feature_colors_ts = [feature_colors[i] for i in ts_indices]
+
+plot_lime_values(
+    lime_values_avg_ts_reordered, lime_values_avg_F_ts_reordered, lime_values_avg_T,
+    feat_names=feature_names_ts_display,
+    num_infusion_val=avg_num_infusion,
+    save_path=f'{out_dir}/lime_values_{option}_{dataset}_time_series_only.pdf',
+    n_folds_used=n_folds_used,
+    title_suffix=' [time series features only]',
+    num_infusion_included=False,
+    feat_colors=feature_colors_ts,
+)
+# values (no time stamp) | missingness indicators of time-series features. Gender/age indicators are constant
+# (never missing), so dropped. Time/feature importance recomputed over shown columns; no num_infusion.
+miss_ts_idx = [i for i in plotting_reorder_indices_wt if feature_names_without_time[i] not in ('gender', 'age at seq')]
+miss_names_display = [feature_names_plotting_display_wt[k] for k, i in enumerate(plotting_reorder_indices_wt)
+                      if i in miss_ts_idx]
+miss_colors = [feature_colors_wt[k] for k, i in enumerate(plotting_reorder_indices_wt) if i in miss_ts_idx]
+_vals_signed = across_folds_lime_values[:, :, :-1][:, :, plotting_reorder_indices_wt]     # [folds, T, F_wt]
+_vals_abs    = across_folds_lime_abs[:, :, :-1][:, :, plotting_reorder_indices_wt]
+_miss_signed = across_folds_lime_miss[:, :, miss_ts_idx]
+_miss_abs    = across_folds_lime_miss_abs[:, :, miss_ts_idx]
+_comb_signed = np.concatenate([_vals_signed, _miss_signed], axis=2)
+_comb_abs    = np.concatenate([_vals_abs, _miss_abs], axis=2)
+_comb_T      = _comb_abs.mean(axis=(0, 2))
+_comb_F      = np.average(_comb_abs.mean(axis=0), axis=0, weights=_comb_T)
+
+plot_lime_values(
+    _comb_signed.mean(axis=0), _comb_F, _comb_T,
+    feat_names=feature_names_plotting_display_wt + miss_names_display,
+    num_infusion_val=avg_num_infusion,
+    save_path=f'{out_dir}/lime_values_{option}_{dataset}_remove_time_with_missingness.pdf',
+    n_folds_used=n_folds_used,
+    title_suffix=' [no timestamp; with missingness indicators]',
+    num_infusion_included=False,
+    feat_colors=feature_colors_wt + miss_colors,
+    block_split=_vals_signed.shape[2],
+)
+_imp_m = _pd.DataFrame({'feature': feature_names_plotting_display_wt + miss_names_display,
+                        'input': ['value'] * _vals_signed.shape[2] + ['missingness_indicator'] * len(miss_names_display),
+                        'importance': _comb_F})
+_imp_m['share_pct'] = 100 * _imp_m['importance'] / _imp_m['importance'].sum()
+_imp_m['importance_mode'] = LIME_IMPORTANCE
+_imp_m.to_csv(f'{out_dir}/lime_feature_importance_{option}_{dataset}_with_missingness.csv', index=False)
+print(f"Saved: {out_dir}/lime_feature_importance_{option}_{dataset}_with_missingness.csv")
+print("\nDone.")

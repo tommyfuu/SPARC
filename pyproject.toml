@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparc-clinical"
+dynamic = ["version"]
+description = "SPARC: longitudinal models that predict adverse events of cancer treatment from routine labs and vitals."
+readme = "README.md"
+license = {text = "CC-BY-NC-ND-4.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.4",
+    "pytorch-lightning>=2.3,<3",
+    "torchmetrics>=1.0",
+    "torchsurv>=0.1.3,<0.1.6",     # 0.1.6 requires boolean events, which the model does not pass
+    "tensorboard>=2.9",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "statsmodels>=0.14",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=14"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.25"]
+dev = ["sparc-clinical[parquet]", "pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+sparc = "sparc_clinical.cli:main"
+
+[project.urls]
+Repository = "https://github.com/tommyfuu/SPARC"
+Documentation = "https://tommyfuu.github.io/SPARC"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sparc_clinical.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning", "ignore::FutureWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+include = ["src/**/*.py", "tests/**/*.py", "data/bundle_io.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

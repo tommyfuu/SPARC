@@ -1,0 +1,26 @@
+# Finetuning for neutropenia with the settings of the models in the paper.
+#   sparc train --config examples/finetune.yaml -f 1     # train fold 1
+#   sparc eval  --config examples/finetune.yaml -f 1     # evaluate it on the test set
+dataset: MYSITE_CAIA
+volume_path: /path/to/data
+pretrained_model_path: /path/to/runs/pretrain    # parent of fold0 ... fold9
+output_model_path: /path/to/runs/neutropenia
+
+scheme: finetune
+option: neutropenia_risk
+med_of_choice: [DOCETAXEL, SACITUZUMAB GOVITECAN, CISPLATIN, TOPOTECAN, IRINOTECAN,
+                IRINOTECAN LIPOSOMAL, CYCLOPHOSPHAMIDE+DOXORUBICIN+VINCRISTINE, BENDAMUSTINE,
+                CARBOPLATIN, ETOPOSIDE, CABAZITAXEL]
+add_num_infusion: true
+loss_option: hybrid
+
+# Model settings: keep these the same as the pretrained model and between train and eval.
+modules_cat: parsimonious
+num_tp: 20
+time_processing: attention
+use_module_tokenizer: true
+use_continuous_time: true
+post_mlp_dropout: 0.2
+batch_first: true
+epochs: 200
+early_stop_patience: 30
